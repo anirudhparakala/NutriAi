@@ -10,6 +10,7 @@ from core import vision_estimator, qa_manager
 from core.schemas import VisionEstimate
 from core.json_repair import parse_or_repair_json
 from integrations.search_bridge import create_search_tool_function
+from integrations import db
 from pydantic import BaseModel
 
 # --- Page Configuration ---
@@ -67,6 +68,36 @@ def load_css():
     st.markdown("""<style>/* Your custom CSS can go here */</style>""", unsafe_allow_html=True)
 
 
+def parse_weight_overrides(weight_text: str) -> list[dict]:
+    """
+    Parse user input like 'chicken 165g, rice 180g, olive oil 10g' into structured updates.
+
+    Args:
+        weight_text: Comma-separated list of ingredient weights
+
+    Returns:
+        List of ingredient updates with name and amount
+    """
+    import re
+
+    updates = []
+    # Split by comma and process each item
+    items = [item.strip() for item in weight_text.split(',')]
+
+    for item in items:
+        # Look for pattern: ingredient_name number(g|grams)
+        match = re.search(r'(.+?)\s+(\d+(?:\.\d+)?)\s*g(?:rams)?', item, re.IGNORECASE)
+        if match:
+            ingredient_name = match.group(1).strip()
+            amount = float(match.group(2))
+            updates.append({
+                "name": ingredient_name,
+                "amount": amount
+            })
+
+    return updates
+
+
 def display_vision_estimate(estimate: VisionEstimate) -> str:
     """
     Converts a VisionEstimate to a user-friendly display format.
@@ -94,6 +125,9 @@ def main():
     load_css()
     st.title("Intelligent AI Calorie Estimator 🧠")
 
+    # Initialize database for logging
+    db.init()
+
     if "analysis_stage" not in st.session_state:
         st.session_state.analysis_stage = "upload"
     if "uploaded_image_data" not in st.session_state:
@@ -115,8 +149,8 @@ def main():
         st.image(st.session_state.uploaded_image_data, caption="Your meal.", use_container_width=True)
         if st.button("🔍 Analyze Food"):
             with st.spinner("Performing expert analysis..."):
-                # Use the new vision estimator
-                estimate = vision_estimator.estimate(st.session_state.uploaded_image_data, model)
+                # Use the new vision estimator with tool support
+                estimate = vision_estimator.estimate(st.session_state.uploaded_image_data, model, available_tools)
 
                 if estimate is None:
                     st.error("Failed to analyze the image. Please try again.", icon="❌")
@@ -161,7 +195,8 @@ def main():
                 refinement = qa_manager.refine(
                     context=json.dumps(context),
                     user_input=prompt,
-                    chat_session=conversation_chat
+                    chat_session=conversation_chat,
+                    available_tools=available_tools
                 )
 
                 if refinement:
@@ -195,11 +230,43 @@ def main():
                 # Store the conversation for final calculation
                 st.session_state.conversation_chat = conversation_chat
 
+        # Add polite user override for known weights
+        st.caption("💡 Know exact weights? If you can provide grams (even rough), I'll replace my estimates and recalc more accurately.")
+
+        weight_override = st.text_area(
+            "Optional: Provide exact weights (e.g., 'chicken 165g, rice 180g, olive oil 10g')",
+            placeholder="chicken 165g, rice 180g, olive oil 10g",
+            height=60
+        )
+
+        if weight_override and st.button("🔄 Update with Your Weights"):
+            # Parse user weight inputs
+            weight_updates = parse_weight_overrides(weight_override)
+            if weight_updates:
+                # Create a refinement with user-provided weights
+                user_refinement_text = f"I can provide exact weights: {weight_override}"
+                context = st.session_state.vision_estimate.model_dump() if st.session_state.vision_estimate else {}
+                refinement = qa_manager.refine(
+                    context=json.dumps(context),
+                    user_input=user_refinement_text,
+                    chat_session=st.session_state.get('conversation_chat', conversation_chat),
+                    available_tools=available_tools
+                )
+
+                if refinement:
+                    st.success(f"✅ Updated {len(refinement.updated_ingredients)} ingredients with your weights!")
+                    if "refinements" not in st.session_state:
+                        st.session_state.refinements = []
+                    st.session_state.refinements.append(refinement)
+                else:
+                    st.warning("Could not process your weight updates. Please try rephrasing.")
+
         if st.button("✅ All Details Provided, Calculate Final Estimate!"):
             with st.spinner("Finalizing..."):
-                # Use the QA manager for final calculation
+                # Use the QA manager for final calculation with tool support
                 final_response = qa_manager.generate_final_calculation(
-                    st.session_state.get('conversation_chat', conversation_chat)
+                    st.session_state.get('conversation_chat', conversation_chat),
+                    available_tools
                 )
                 st.session_state.final_analysis = final_response
                 st.session_state.analysis_stage = "results"
@@ -262,6 +329,20 @@ def main():
             col2.metric("Total Protein", f"{total_protein}g")
             col3.metric("Total Carbs", f"{total_carbs}g")
             col4.metric("Total Fat", f"{total_fat}g")
+
+            # Log successful session to database
+            if st.session_state.vision_estimate and not st.session_state.get("session_logged", False):
+                try:
+                    session_id = db.log_session(
+                        estimate=st.session_state.vision_estimate,
+                        refinements=st.session_state.get("refinements", []),
+                        final_json=raw_text,
+                        tool_calls_count=st.session_state.get("tool_calls_count", 0)
+                    )
+                    st.session_state.session_logged = True
+                    st.caption(f"📊 Session logged (ID: {session_id}) for future improvements")
+                except Exception as e:
+                    print(f"Failed to log session: {e}")
 
         except (ValueError, json.JSONDecodeError) as e:
             st.error(f"Could not parse the final analysis. Error: {e}", icon="🤷")

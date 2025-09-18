@@ -3,6 +3,7 @@ from PIL import Image
 import io
 from .schemas import VisionEstimate
 from .json_repair import parse_or_repair_json, llm_retry_with_system_hardener
+from .tool_runner import run_with_tools
 
 
 def load_vision_prompt() -> str:
@@ -43,13 +44,14 @@ Required JSON Output Format:
 """
 
 
-def estimate(image_bytes: bytes, model: genai.GenerativeModel) -> VisionEstimate | None:
+def estimate(image_bytes: bytes, model: genai.GenerativeModel, available_tools: dict = None) -> VisionEstimate | None:
     """
     Analyzes an image and returns a structured nutritional estimate.
 
     Args:
         image_bytes: Raw image data
         model: Configured Gemini model instance
+        available_tools: Dict mapping tool names to functions for search, etc.
 
     Returns:
         VisionEstimate object or None if parsing failed
@@ -61,17 +63,33 @@ def estimate(image_bytes: bytes, model: genai.GenerativeModel) -> VisionEstimate
         # Convert bytes to PIL Image
         image = Image.open(io.BytesIO(image_bytes))
 
-        # Create chat session and send message
+        # Create chat session and send message with tool support
         chat = model.start_chat()
-        response = chat.send_message([prompt, image])
+        if available_tools:
+            response_text = run_with_tools(chat, available_tools, [prompt, image])
+        else:
+            response = chat.send_message([prompt, image])
+            response_text = response.text
 
         # Parse and validate response
-        parsed_estimate, errors = parse_or_repair_json(response.text, VisionEstimate)
+        parsed_estimate, errors = parse_or_repair_json(response_text, VisionEstimate)
 
         if parsed_estimate is None and errors:
             # Attempt retry with hardener
             print(f"Initial parsing failed: {errors}")
-            retry_response = llm_retry_with_system_hardener(chat, prompt, errors)
+            if available_tools:
+                hardener_prompt = """
+CRITICAL: Your previous response had JSON parsing errors.
+You MUST respond with ONLY a single, valid JSON object. No other text.
+- No markdown code blocks
+- No trailing commas
+- No comments
+- No prose before or after the JSON
+Please retry the request and provide ONLY the JSON response.
+"""
+                retry_response = run_with_tools(chat, available_tools, hardener_prompt)
+            else:
+                retry_response = llm_retry_with_system_hardener(chat, prompt, errors)
             parsed_estimate, retry_errors = parse_or_repair_json(retry_response, VisionEstimate)
 
             if parsed_estimate is None:
@@ -83,9 +101,9 @@ def estimate(image_bytes: bytes, model: genai.GenerativeModel) -> VisionEstimate
         if parsed_estimate:
             try:
                 import json
-                parsed_estimate.raw_model = json.loads(response.text)
+                parsed_estimate.raw_model = json.loads(response_text)
             except:
-                parsed_estimate.raw_model = {"raw_text": response.text}
+                parsed_estimate.raw_model = {"raw_text": response_text}
 
         return parsed_estimate
 

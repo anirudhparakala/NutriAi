@@ -1,6 +1,7 @@
 import google.generativeai as genai
 from .schemas import RefinementUpdate, VisionEstimate
 from .json_repair import parse_or_repair_json, llm_retry_with_system_hardener
+from .tool_runner import run_with_tools
 
 
 def load_qa_prompt() -> str:
@@ -37,7 +38,7 @@ Required JSON Output Format:
 """
 
 
-def refine(context: str, user_input: str, chat_session: genai.ChatSession) -> RefinementUpdate | None:
+def refine(context: str, user_input: str, chat_session: genai.ChatSession, available_tools: dict = None) -> RefinementUpdate | None:
     """
     Processes user input to refine the nutritional estimate.
 
@@ -45,6 +46,7 @@ def refine(context: str, user_input: str, chat_session: genai.ChatSession) -> Re
         context: Context from the previous conversation
         user_input: User's clarification or correction
         chat_session: Active chat session with conversation history
+        available_tools: Dict mapping tool names to functions for search, etc.
 
     Returns:
         RefinementUpdate object or None if parsing failed
@@ -63,16 +65,32 @@ User input: {user_input}
 Based on this information, provide the JSON response with any updates to ingredients or assumptions.
 """
 
-        # Send message to chat session
-        response = chat_session.send_message(full_prompt)
+        # Send message to chat session with tool support
+        if available_tools:
+            response_text = run_with_tools(chat_session, available_tools, full_prompt)
+        else:
+            response = chat_session.send_message(full_prompt)
+            response_text = response.text
 
         # Parse and validate response
-        parsed_update, errors = parse_or_repair_json(response.text, RefinementUpdate)
+        parsed_update, errors = parse_or_repair_json(response_text, RefinementUpdate)
 
         if parsed_update is None and errors:
             # Attempt retry with hardener
             print(f"Initial parsing failed: {errors}")
-            retry_response = llm_retry_with_system_hardener(chat_session, full_prompt, errors)
+            if available_tools:
+                hardener_prompt = """
+CRITICAL: Your previous response had JSON parsing errors.
+You MUST respond with ONLY a single, valid JSON object. No other text.
+- No markdown code blocks
+- No trailing commas
+- No comments
+- No prose before or after the JSON
+Please retry the request and provide ONLY the JSON response.
+"""
+                retry_response = run_with_tools(chat_session, available_tools, hardener_prompt)
+            else:
+                retry_response = llm_retry_with_system_hardener(chat_session, full_prompt, errors)
             parsed_update, retry_errors = parse_or_repair_json(retry_response, RefinementUpdate)
 
             if parsed_update is None:
@@ -84,9 +102,9 @@ Based on this information, provide the JSON response with any updates to ingredi
         if parsed_update:
             try:
                 import json
-                parsed_update.raw_model = json.loads(response.text)
+                parsed_update.raw_model = json.loads(response_text)
             except:
-                parsed_update.raw_model = {"raw_text": response.text}
+                parsed_update.raw_model = {"raw_text": response_text}
 
         return parsed_update
 
@@ -95,13 +113,14 @@ Based on this information, provide the JSON response with any updates to ingredi
         return None
 
 
-def generate_final_calculation(chat_session: genai.ChatSession) -> str:
+def generate_final_calculation(chat_session: genai.ChatSession, available_tools: dict = None) -> str:
     """
     Generates the final nutritional breakdown in the legacy JSON format
     for backward compatibility with the existing UI.
 
     Args:
         chat_session: Active chat session with full conversation history
+        available_tools: Dict mapping tool names to functions for search, etc.
 
     Returns:
         JSON string with breakdown format expected by UI
@@ -120,8 +139,11 @@ Now, provide the final JSON response for the meal we discussed.
 """
 
     try:
-        response = chat_session.send_message(final_prompt)
-        return response.text
+        if available_tools:
+            return run_with_tools(chat_session, available_tools, final_prompt)
+        else:
+            response = chat_session.send_message(final_prompt)
+            return response.text
     except Exception as e:
         print(f"Error generating final calculation: {e}")
         return '{"breakdown": []}'
