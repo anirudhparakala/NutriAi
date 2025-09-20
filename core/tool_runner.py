@@ -12,9 +12,10 @@ def run_with_tools(chat: genai.ChatSession, available_tools: dict, user_msg: str
         user_msg: Message to send (string or list for multimodal)
 
     Returns:
-        Final text response from the model after all tool calls are resolved
+        Tuple of (final_text_response, tool_calls_count)
     """
     resp = chat.send_message(user_msg)
+    tool_calls_count = 0
 
     # Handle tool calls in a loop until we get regular content
     while True:
@@ -31,13 +32,31 @@ def run_with_tools(chat: genai.ChatSession, available_tools: dict, user_msg: str
                 function_calls.append(part.function_call)
 
         if not function_calls:
-            # No more function calls, return the text content
-            return resp.text
+            # No more function calls, extract final text content
+            final_text = resp.text
+
+            # Graceful fallback for non-text replies
+            if not final_text or final_text.strip() == "":
+                # Look for any text or JSON parts to return
+                for part in parts:
+                    if hasattr(part, 'text') and part.text and part.text.strip():
+                        final_text = part.text
+                        break
+                    elif hasattr(part, 'json') and part.json:
+                        final_text = json.dumps(part.json)
+                        break
+
+                # If still empty, provide a fallback
+                if not final_text or final_text.strip() == "":
+                    final_text = "Analysis completed successfully."
+
+            return final_text, tool_calls_count
 
         # Execute all function calls and send responses back
         for call in function_calls:
             tool_name = call.name
             tool_args = dict(call.args)  # Convert from Gemini's args format
+            tool_calls_count += 1
 
             # Execute the tool
             if tool_name in available_tools:
@@ -51,15 +70,30 @@ def run_with_tools(chat: genai.ChatSession, available_tools: dict, user_msg: str
                 tool_result = json.dumps({"error": f"Unknown tool: {tool_name}"})
                 print(f"Unknown tool requested: {tool_name}")
 
-            # Send tool response back to the model
-            resp = chat.send_message(
-                [genai.protos.Part(
-                    function_response=genai.protos.FunctionResponse(
-                        name=tool_name,
-                        response={"content": tool_result},
-                    )
-                )]
-            )
+            # Send tool response back to the model with SDK-compatible format
+            try:
+                # Try the structured format first (newer SDK versions)
+                resp = chat.send_message(
+                    [genai.protos.Part(
+                        function_response=genai.protos.FunctionResponse(
+                            name=tool_name,
+                            response={"content": tool_result},
+                        )
+                    )]
+                )
+            except Exception as e:
+                # Fallback format for SDK compatibility
+                try:
+                    resp = chat.send_message([{
+                        "function_response": {
+                            "name": tool_name,
+                            "response": {"content": tool_result}
+                        }
+                    }])
+                except Exception as e2:
+                    print(f"SDK compatibility error: {e2}")
+                    # Simple text fallback
+                    resp = chat.send_message(f"Tool {tool_name} returned: {tool_result}")
 
 
 def run_with_tools_and_parse(chat: genai.ChatSession, available_tools: dict, user_msg: str | list,
@@ -75,17 +109,18 @@ def run_with_tools_and_parse(chat: genai.ChatSession, available_tools: dict, use
         max_retries: Number of retries if parsing fails
 
     Returns:
-        Raw text response, or parsed result if parse_function provided
+        Tuple of (parsed_result_or_text, tool_calls_count)
     """
-    response_text = run_with_tools(chat, available_tools, user_msg)
+    response_text, tool_calls_count = run_with_tools(chat, available_tools, user_msg)
 
     if parse_function is None:
-        return response_text
+        return response_text, tool_calls_count
 
     # Try parsing with retries
     for attempt in range(max_retries + 1):
         try:
-            return parse_function(response_text)
+            parsed_result = parse_function(response_text)
+            return parsed_result, tool_calls_count
         except Exception as e:
             if attempt < max_retries:
                 print(f"Parse attempt {attempt + 1} failed: {e}, retrying...")
@@ -99,9 +134,10 @@ You MUST respond with ONLY a single, valid JSON object. No other text.
 - No prose before or after the JSON
 Please retry with proper JSON format.
 """
-                response_text = run_with_tools(chat, available_tools, hardener_msg)
+                response_text, retry_tool_calls = run_with_tools(chat, available_tools, hardener_msg)
+                tool_calls_count += retry_tool_calls
             else:
                 print(f"Final parse attempt failed: {e}")
                 raise
 
-    return response_text
+    return response_text, tool_calls_count

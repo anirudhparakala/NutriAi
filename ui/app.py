@@ -8,9 +8,9 @@ import io
 # Import new modular components
 from core import vision_estimator, qa_manager
 from core.schemas import VisionEstimate
-from core.json_repair import parse_or_repair_json
+from core.json_repair import parse_or_repair_json, validate_macro_sanity
 from integrations.search_bridge import create_search_tool_function
-from integrations import db
+from integrations import db, usda
 from pydantic import BaseModel
 
 # --- Page Configuration ---
@@ -27,6 +27,14 @@ try:
     TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
     genai.configure(api_key=GEMINI_API_KEY)
     tavily = TavilyClient(api_key=TAVILY_API_KEY)
+
+    # Optional USDA API key for Phase 2 features
+    USDA_API_KEY = st.secrets.get("USDA_API_KEY")
+    if USDA_API_KEY:
+        usda.set_api_key(USDA_API_KEY)
+    else:
+        st.warning("USDA API key not found. Phase 2 nutrition lookup features will be limited. Add USDA_API_KEY to your secrets.toml for enhanced functionality.", icon="💡")
+
 except (FileNotFoundError, KeyError):
     st.error("API keys not found in secrets. Please check your .streamlit/secrets.toml file.", icon="⚠️")
     st.stop()
@@ -150,11 +158,14 @@ def main():
         if st.button("🔍 Analyze Food"):
             with st.spinner("Performing expert analysis..."):
                 # Use the new vision estimator with tool support
-                estimate = vision_estimator.estimate(st.session_state.uploaded_image_data, model, available_tools)
+                estimate, vision_tool_calls = vision_estimator.estimate(st.session_state.uploaded_image_data, model, available_tools)
 
                 if estimate is None:
                     st.error("Failed to analyze the image. Please try again.", icon="❌")
                     return
+
+                # Track tool calls
+                st.session_state.tool_calls_count = st.session_state.get("tool_calls_count", 0) + vision_tool_calls
 
                 # Store the structured estimate
                 st.session_state.vision_estimate = estimate
@@ -183,8 +194,10 @@ def main():
                     with st.chat_message("assistant"):
                         st.markdown(message.parts[0].text)
 
-        # Create a fresh chat session for conversation
-        conversation_chat = model.start_chat()
+        # Create or reuse chat session for conversation persistence
+        if "conversation_chat" not in st.session_state:
+            st.session_state.conversation_chat = model.start_chat()
+        conversation_chat = st.session_state.conversation_chat
 
         if prompt := st.chat_input("Provide more details..."):
             with st.chat_message("user"):
@@ -192,12 +205,15 @@ def main():
             with st.spinner("Processing your input..."):
                 # Use structured QA manager instead of free-form chat
                 context = st.session_state.vision_estimate.model_dump() if st.session_state.vision_estimate else {}
-                refinement = qa_manager.refine(
+                refinement, qa_tool_calls = qa_manager.refine(
                     context=json.dumps(context),
                     user_input=prompt,
                     chat_session=conversation_chat,
                     available_tools=available_tools
                 )
+
+                # Track tool calls
+                st.session_state.tool_calls_count = st.session_state.get("tool_calls_count", 0) + qa_tool_calls
 
                 if refinement:
                     # Display the structured response
@@ -227,11 +243,10 @@ def main():
                     with st.chat_message("assistant"):
                         st.markdown("I understand your input, but I'm having trouble processing it in a structured way. Please try rephrasing your clarification.")
 
-                # Store the conversation for final calculation
-                st.session_state.conversation_chat = conversation_chat
+                # Conversation chat is already in session state
 
         # Add polite user override for known weights
-        st.caption("💡 Know exact weights? If you can provide grams (even rough), I'll replace my estimates and recalc more accurately.")
+        st.caption("💡 If you know exact grams for anything, type them (e.g., 'rice 180g, chicken 165g') and I'll recalc more accurately.")
 
         weight_override = st.text_area(
             "Optional: Provide exact weights (e.g., 'chicken 165g, rice 180g, olive oil 10g')",
@@ -246,12 +261,15 @@ def main():
                 # Create a refinement with user-provided weights
                 user_refinement_text = f"I can provide exact weights: {weight_override}"
                 context = st.session_state.vision_estimate.model_dump() if st.session_state.vision_estimate else {}
-                refinement = qa_manager.refine(
+                refinement, weights_tool_calls = qa_manager.refine(
                     context=json.dumps(context),
                     user_input=user_refinement_text,
                     chat_session=st.session_state.get('conversation_chat', conversation_chat),
                     available_tools=available_tools
                 )
+
+                # Track tool calls
+                st.session_state.tool_calls_count = st.session_state.get("tool_calls_count", 0) + weights_tool_calls
 
                 if refinement:
                     st.success(f"✅ Updated {len(refinement.updated_ingredients)} ingredients with your weights!")
@@ -264,10 +282,13 @@ def main():
         if st.button("✅ All Details Provided, Calculate Final Estimate!"):
             with st.spinner("Finalizing..."):
                 # Use the QA manager for final calculation with tool support
-                final_response = qa_manager.generate_final_calculation(
+                final_response, final_tool_calls = qa_manager.generate_final_calculation(
                     st.session_state.get('conversation_chat', conversation_chat),
                     available_tools
                 )
+
+                # Track tool calls
+                st.session_state.tool_calls_count = st.session_state.get("tool_calls_count", 0) + final_tool_calls
                 st.session_state.final_analysis = final_response
                 st.session_state.analysis_stage = "results"
                 st.rerun()
@@ -286,6 +307,15 @@ def main():
                 raise ValueError(f"Could not parse final breakdown JSON: {errors}")
 
             data = parsed_data.model_dump()
+
+            # Validate macro sanity (calories ≈ 4p+4c+9f)
+            is_valid, validation_errors = validate_macro_sanity(data)
+            if not is_valid:
+                st.warning("⚠️ Nutritional calculations may be inaccurate:")
+                for error in validation_errors:
+                    st.caption(f"• {error}")
+                st.caption("The AI may have miscalculated. Consider verifying with nutrition labels.")
+
             breakdown_list = data.get("breakdown", [])
             if not breakdown_list:
                 st.warning("The AI was unable to provide a breakdown. Please try again.")

@@ -14,6 +14,8 @@ def load_qa_prompt() -> str:
         return """
 You are Nutri-AI's refinement module. Based on the conversation context and user's clarifications, update the meal estimate.
 
+IMPORTANT: If the user mentions branded/restaurant/fast-food items, first call `perform_web_search` with a precise query like '<brand> <item> nutrition facts' and use those results.
+
 CRITICAL: Respond with ONLY a single JSON object. No prose. No markdown. No trailing commas.
 
 Required JSON Output Format:
@@ -38,7 +40,7 @@ Required JSON Output Format:
 """
 
 
-def refine(context: str, user_input: str, chat_session: genai.ChatSession, available_tools: dict = None) -> RefinementUpdate | None:
+def refine(context: str, user_input: str, chat_session: genai.ChatSession, available_tools: dict = None) -> tuple[RefinementUpdate | None, int]:
     """
     Processes user input to refine the nutritional estimate.
 
@@ -49,7 +51,7 @@ def refine(context: str, user_input: str, chat_session: genai.ChatSession, avail
         available_tools: Dict mapping tool names to functions for search, etc.
 
     Returns:
-        RefinementUpdate object or None if parsing failed
+        Tuple of (RefinementUpdate object or None if parsing failed, tool_calls_count)
     """
     try:
         # Load prompt template
@@ -67,10 +69,11 @@ Based on this information, provide the JSON response with any updates to ingredi
 
         # Send message to chat session with tool support
         if available_tools:
-            response_text = run_with_tools(chat_session, available_tools, full_prompt)
+            response_text, tool_calls_count = run_with_tools(chat_session, available_tools, full_prompt)
         else:
             response = chat_session.send_message(full_prompt)
             response_text = response.text
+            tool_calls_count = 0
 
         # Parse and validate response
         parsed_update, errors = parse_or_repair_json(response_text, RefinementUpdate)
@@ -88,7 +91,8 @@ You MUST respond with ONLY a single, valid JSON object. No other text.
 - No prose before or after the JSON
 Please retry the request and provide ONLY the JSON response.
 """
-                retry_response = run_with_tools(chat_session, available_tools, hardener_prompt)
+                retry_response, retry_tool_calls = run_with_tools(chat_session, available_tools, hardener_prompt)
+                tool_calls_count += retry_tool_calls
             else:
                 retry_response = llm_retry_with_system_hardener(chat_session, full_prompt, errors)
             parsed_update, retry_errors = parse_or_repair_json(retry_response, RefinementUpdate)
@@ -96,7 +100,7 @@ Please retry the request and provide ONLY the JSON response.
             if parsed_update is None:
                 print(f"Retry parsing also failed: {retry_errors}")
                 print(f"Raw response: {retry_response}")
-                return None
+                return None, tool_calls_count
 
         # Store raw model response for debugging
         if parsed_update:
@@ -106,14 +110,14 @@ Please retry the request and provide ONLY the JSON response.
             except:
                 parsed_update.raw_model = {"raw_text": response_text}
 
-        return parsed_update
+        return parsed_update, tool_calls_count
 
     except Exception as e:
         print(f"Error in QA refinement: {e}")
-        return None
+        return None, 0
 
 
-def generate_final_calculation(chat_session: genai.ChatSession, available_tools: dict = None) -> str:
+def generate_final_calculation(chat_session: genai.ChatSession, available_tools: dict = None) -> tuple[str, int]:
     """
     Generates the final nutritional breakdown in the legacy JSON format
     for backward compatibility with the existing UI.
@@ -123,7 +127,7 @@ def generate_final_calculation(chat_session: genai.ChatSession, available_tools:
         available_tools: Dict mapping tool names to functions for search, etc.
 
     Returns:
-        JSON string with breakdown format expected by UI
+        Tuple of (JSON string with breakdown format expected by UI, tool_calls_count)
     """
     final_prompt = """
 Based on our entire conversation, your final and most important task is to act as an expert nutritionist and CALCULATE a detailed nutritional breakdown.
@@ -140,10 +144,11 @@ Now, provide the final JSON response for the meal we discussed.
 
     try:
         if available_tools:
-            return run_with_tools(chat_session, available_tools, final_prompt)
+            response_text, tool_calls_count = run_with_tools(chat_session, available_tools, final_prompt)
+            return response_text, tool_calls_count
         else:
             response = chat_session.send_message(final_prompt)
-            return response.text
+            return response.text, 0
     except Exception as e:
         print(f"Error generating final calculation: {e}")
-        return '{"breakdown": []}'
+        return '{"breakdown": []}', 0

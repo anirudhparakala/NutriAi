@@ -16,6 +16,8 @@ def load_vision_prompt() -> str:
         return """
 You are Nutri-AI, an expert visual nutritional estimator. Analyze the food image and provide a structured estimate.
 
+IMPORTANT: If the dish appears branded/restaurant/fast-food, first call `perform_web_search` with a precise query like '<brand> <item> nutrition facts' and use those results.
+
 CRITICAL: Respond with ONLY a single JSON object. No prose. No markdown. No trailing commas.
 
 Required JSON Output Format:
@@ -44,7 +46,7 @@ Required JSON Output Format:
 """
 
 
-def estimate(image_bytes: bytes, model: genai.GenerativeModel, available_tools: dict = None) -> VisionEstimate | None:
+def estimate(image_bytes: bytes, model: genai.GenerativeModel, available_tools: dict = None) -> tuple[VisionEstimate | None, int]:
     """
     Analyzes an image and returns a structured nutritional estimate.
 
@@ -54,7 +56,7 @@ def estimate(image_bytes: bytes, model: genai.GenerativeModel, available_tools: 
         available_tools: Dict mapping tool names to functions for search, etc.
 
     Returns:
-        VisionEstimate object or None if parsing failed
+        Tuple of (VisionEstimate object or None if parsing failed, tool_calls_count)
     """
     try:
         # Load prompt template
@@ -66,10 +68,11 @@ def estimate(image_bytes: bytes, model: genai.GenerativeModel, available_tools: 
         # Create chat session and send message with tool support
         chat = model.start_chat()
         if available_tools:
-            response_text = run_with_tools(chat, available_tools, [prompt, image])
+            response_text, tool_calls_count = run_with_tools(chat, available_tools, [prompt, image])
         else:
             response = chat.send_message([prompt, image])
             response_text = response.text
+            tool_calls_count = 0
 
         # Parse and validate response
         parsed_estimate, errors = parse_or_repair_json(response_text, VisionEstimate)
@@ -87,7 +90,8 @@ You MUST respond with ONLY a single, valid JSON object. No other text.
 - No prose before or after the JSON
 Please retry the request and provide ONLY the JSON response.
 """
-                retry_response = run_with_tools(chat, available_tools, hardener_prompt)
+                retry_response, retry_tool_calls = run_with_tools(chat, available_tools, hardener_prompt)
+                tool_calls_count += retry_tool_calls
             else:
                 retry_response = llm_retry_with_system_hardener(chat, prompt, errors)
             parsed_estimate, retry_errors = parse_or_repair_json(retry_response, VisionEstimate)
@@ -95,7 +99,7 @@ Please retry the request and provide ONLY the JSON response.
             if parsed_estimate is None:
                 print(f"Retry parsing also failed: {retry_errors}")
                 print(f"Raw response: {retry_response}")
-                return None
+                return None, tool_calls_count
 
         # Store raw model response for debugging
         if parsed_estimate:
@@ -105,8 +109,8 @@ Please retry the request and provide ONLY the JSON response.
             except:
                 parsed_estimate.raw_model = {"raw_text": response_text}
 
-        return parsed_estimate
+        return parsed_estimate, tool_calls_count
 
     except Exception as e:
         print(f"Error in vision estimation: {e}")
-        return None
+        return None, 0

@@ -87,3 +87,67 @@ Please retry the request and provide ONLY the JSON response.
 
     response = chat.send_message(hardener_prompt + "\n\n" + last_prompt)
     return response.text
+
+
+def validate_macro_sanity(breakdown_data: dict, tolerance: float = 0.10) -> Tuple[bool, list[str]]:
+    """
+    Validates that calories roughly match 4p+4c+9f formula (±tolerance).
+
+    Args:
+        breakdown_data: Dictionary with breakdown key containing list of food items
+        tolerance: Allowed percentage deviation (default 10%)
+
+    Returns:
+        Tuple of (is_valid, error_messages)
+    """
+    errors = []
+
+    if "breakdown" not in breakdown_data:
+        errors.append("Missing 'breakdown' key in nutrition data")
+        return False, errors
+
+    breakdown = breakdown_data["breakdown"]
+    if not isinstance(breakdown, list):
+        errors.append("'breakdown' should be a list")
+        return False, errors
+
+    for i, item in enumerate(breakdown):
+        if not isinstance(item, dict):
+            errors.append(f"Item {i} in breakdown should be a dictionary")
+            continue
+
+        # Extract macros, default to 0 if missing
+        calories = item.get("calories", 0)
+        protein = item.get("protein_grams", 0)
+        carbs = item.get("carbs_grams", 0)
+        fat = item.get("fat_grams", 0)
+
+        # Skip if any values are not numeric
+        try:
+            calories = float(calories)
+            protein = float(protein)
+            carbs = float(carbs)
+            fat = float(fat)
+        except (ValueError, TypeError):
+            errors.append(f"Item '{item.get('item', i)}': Non-numeric macro values")
+            continue
+
+        # Calculate expected calories: 4 * protein + 4 * carbs + 9 * fat
+        expected_calories = (4 * protein) + (4 * carbs) + (9 * fat)
+
+        # Skip validation if expected calories is 0 (empty item)
+        if expected_calories == 0:
+            continue
+
+        # Calculate percentage difference
+        if expected_calories > 0:
+            diff_percent = abs(calories - expected_calories) / expected_calories
+
+            if diff_percent > tolerance:
+                errors.append(
+                    f"Item '{item.get('item', i)}': Calories {calories} don't match macros "
+                    f"(expected ~{expected_calories:.0f} from {protein}p+{carbs}c+{fat}f). "
+                    f"Difference: {diff_percent:.1%} (>{tolerance:.0%} tolerance)"
+                )
+
+    return len(errors) == 0, errors

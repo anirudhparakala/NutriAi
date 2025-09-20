@@ -33,8 +33,22 @@ def normalize_with_web(name: str, search_fn) -> str:
     # Web assist: query for common name
     try:
         query = f"common name for '{base}' food ingredient nutrition"
-        results = json.loads(search_fn(query=query))
-        text = " ".join(r.get("content", "") for r in results)[:5000]
+        search_result = search_fn(query=query)
+
+        # Handle error responses from search function
+        if isinstance(search_result, str) and search_result.startswith("Error"):
+            print(f"Search error for '{name}': {search_result}")
+            return base
+
+        # Parse search results - expecting JSON string with list of {"content": "..."} objects
+        results = json.loads(search_result)
+
+        # Ensure results is a list
+        if not isinstance(results, list):
+            print(f"Unexpected search result format for '{name}': expected list, got {type(results)}")
+            return base
+
+        text = " ".join(r.get("content", "") for r in results if isinstance(r, dict))[:5000]
 
         # Crude pattern matching for known substitutions
         normalization_pairs = [
