@@ -4,14 +4,23 @@ from tavily import TavilyClient
 import json
 from PIL import Image
 import io
+import logging
+import sys
+import os
+
+# Add parent directory to path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import new modular components
 from core import vision_estimator, qa_manager
 from core.schemas import VisionEstimate
 from core.json_repair import parse_or_repair_json, validate_macro_sanity
 from integrations.search_bridge import create_search_tool_function
-from integrations import db, usda
+from integrations import db, usda, usda_client
 from pydantic import BaseModel
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -28,12 +37,14 @@ try:
     genai.configure(api_key=GEMINI_API_KEY)
     tavily = TavilyClient(api_key=TAVILY_API_KEY)
 
-    # Optional USDA API key for Phase 2 features
+    # Required USDA API key for Phase 2 features
     USDA_API_KEY = st.secrets.get("USDA_API_KEY")
     if USDA_API_KEY:
-        usda.set_api_key(USDA_API_KEY)
+        usda_client.set_api_key(USDA_API_KEY)
+        usda.set_api_key(USDA_API_KEY)  # For backward compatibility
     else:
-        st.warning("USDA API key not found. Phase 2 nutrition lookup features will be limited. Add USDA_API_KEY to your secrets.toml for enhanced functionality.", icon="💡")
+        st.error("USDA API key not found. Phase 2 nutrition lookup requires USDA_API_KEY in your secrets.toml file.", icon="⚠️")
+        st.stop()
 
 except (FileNotFoundError, KeyError):
     st.error("API keys not found in secrets. Please check your .streamlit/secrets.toml file.", icon="⚠️")
@@ -67,7 +78,7 @@ available_tools = {
 }
 
 model = genai.GenerativeModel(
-    model_name="gemini-1.5-pro-latest",
+    model_name="gemini-2.5-flash-lite",
     tools=[my_search_tool]
 )
 
@@ -194,97 +205,109 @@ def main():
                     with st.chat_message("assistant"):
                         st.markdown(message.parts[0].text)
 
+        # Display critical questions with answer input
+        if st.session_state.vision_estimate and st.session_state.vision_estimate.critical_questions:
+            with st.expander("📋 Questions to improve accuracy", expanded=True):
+                for i, question in enumerate(st.session_state.vision_estimate.critical_questions, 1):
+                    st.markdown(f"**{i}. {question.text}**")
+                    if question.options:
+                        st.caption(f"Options: {', '.join(question.options)}")
+
         # Create or reuse chat session for conversation persistence
         if "conversation_chat" not in st.session_state:
             st.session_state.conversation_chat = model.start_chat()
         conversation_chat = st.session_state.conversation_chat
 
-        if prompt := st.chat_input("Provide more details..."):
-            with st.chat_message("user"):
-                st.markdown(prompt)
-            with st.spinner("Processing your input..."):
-                # Use structured QA manager instead of free-form chat
-                context = st.session_state.vision_estimate.model_dump() if st.session_state.vision_estimate else {}
-                refinement, qa_tool_calls = qa_manager.refine(
-                    context=json.dumps(context),
-                    user_input=prompt,
-                    chat_session=conversation_chat,
-                    available_tools=available_tools
-                )
+        # Main answer input - can be used either by pressing Enter OR clicking Calculate button
+        st.markdown("### Answer Questions / Provide Details")
 
-                # Track tool calls
-                st.session_state.tool_calls_count = st.session_state.get("tool_calls_count", 0) + qa_tool_calls
+        # Initialize pending_answer in session state if needed
+        if "pending_answer" not in st.session_state:
+            st.session_state.pending_answer = ""
 
-                if refinement:
-                    # Display the structured response
-                    response_text = "Thank you for the clarification! I've updated my understanding:\n\n"
-
-                    if refinement.updated_ingredients:
-                        response_text += "**Updated ingredients:**\n"
-                        for ingredient in refinement.updated_ingredients:
-                            notes_text = f" ({ingredient.notes})" if ingredient.notes else ""
-                            response_text += f"- {ingredient.name}: {ingredient.amount}g{notes_text}\n"
-                        response_text += "\n"
-
-                    if refinement.updated_assumptions:
-                        response_text += "**Updated assumptions:**\n"
-                        for assumption in refinement.updated_assumptions:
-                            response_text += f"- {assumption.key}: {assumption.value} (confidence: {assumption.confidence:.1%})\n"
-
-                    with st.chat_message("assistant"):
-                        st.markdown(response_text)
-
-                    # Store the refinement for final calculation
-                    if "refinements" not in st.session_state:
-                        st.session_state.refinements = []
-                    st.session_state.refinements.append(refinement)
-                else:
-                    # Fallback if structured parsing failed
-                    with st.chat_message("assistant"):
-                        st.markdown("I understand your input, but I'm having trouble processing it in a structured way. Please try rephrasing your clarification.")
-
-                # Conversation chat is already in session state
-
-        # Add polite user override for known weights
-        st.caption("💡 If you know exact grams for anything, type them (e.g., 'rice 180g, chicken 165g') and I'll recalc more accurately.")
-
-        weight_override = st.text_area(
-            "Optional: Provide exact weights (e.g., 'chicken 165g, rice 180g, olive oil 10g')",
-            placeholder="chicken 165g, rice 180g, olive oil 10g",
-            height=60
+        answer_input = st.text_input(
+            "Type your answers here (e.g., 'diet cola, medium' or 'diet, medium')",
+            placeholder="Example: diet cola, medium fries",
+            key="answer_input_box",
+            help="You can answer critical questions above, or provide any clarifications. Formats like 'diet cola', 'diet, medium', or full sentences all work!"
         )
 
-        if weight_override and st.button("🔄 Update with Your Weights"):
-            # Parse user weight inputs
-            weight_updates = parse_weight_overrides(weight_override)
-            if weight_updates:
-                # Create a refinement with user-provided weights
-                user_refinement_text = f"I can provide exact weights: {weight_override}"
-                context = st.session_state.vision_estimate.model_dump() if st.session_state.vision_estimate else {}
-                refinement, weights_tool_calls = qa_manager.refine(
-                    context=json.dumps(context),
-                    user_input=user_refinement_text,
-                    chat_session=st.session_state.get('conversation_chat', conversation_chat),
-                    available_tools=available_tools
-                )
+        # Process button for immediate refinement (optional - user can also just click Calculate)
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            if st.button("💬 Submit Answer") and answer_input:
+                with st.spinner("Processing your input..."):
+                    # Process the answer immediately
+                    context = st.session_state.vision_estimate.model_dump() if st.session_state.vision_estimate else {}
+                    refinement, qa_tool_calls = qa_manager.refine(
+                        context=json.dumps(context),
+                        user_input=answer_input,
+                        chat_session=conversation_chat,
+                        available_tools=available_tools
+                    )
 
-                # Track tool calls
-                st.session_state.tool_calls_count = st.session_state.get("tool_calls_count", 0) + weights_tool_calls
+                    # Track tool calls
+                    st.session_state.tool_calls_count = st.session_state.get("tool_calls_count", 0) + qa_tool_calls
 
-                if refinement:
-                    st.success(f"✅ Updated {len(refinement.updated_ingredients)} ingredients with your weights!")
-                    if "refinements" not in st.session_state:
-                        st.session_state.refinements = []
-                    st.session_state.refinements.append(refinement)
-                else:
-                    st.warning("Could not process your weight updates. Please try rephrasing.")
+                    if refinement:
+                        # Display the structured response
+                        response_text = "✅ Thank you! I've updated my understanding:\n\n"
 
-        if st.button("✅ All Details Provided, Calculate Final Estimate!"):
-            with st.spinner("Finalizing..."):
-                # Use the QA manager for final calculation with tool support
+                        if refinement.updated_ingredients:
+                            response_text += "**Updated ingredients:**\n"
+                            for ingredient in refinement.updated_ingredients:
+                                notes_text = f" ({ingredient.notes})" if ingredient.notes else ""
+                                response_text += f"- {ingredient.name}: {ingredient.amount}g{notes_text}\n"
+
+                        st.success(response_text)
+
+                        # Store the refinement for final calculation
+                        if "refinements" not in st.session_state:
+                            st.session_state.refinements = []
+                        st.session_state.refinements.append(refinement)
+
+                        # Clear the input after successful submission
+                        st.session_state.answer_input_box = ""
+                        st.rerun()
+                    else:
+                        st.warning("I'm having trouble understanding that. Please try rephrasing (e.g., 'diet cola, medium')")
+
+        st.divider()
+
+        # Show refinement status
+        refinement_count = len(st.session_state.get('refinements', []))
+        if refinement_count > 0:
+            st.info(f"✅ {refinement_count} refinement(s) submitted", icon="✅")
+
+        # Calculate button - NOW auto-processes any pending answer
+        if st.button("🎯 Calculate Final Estimate", type="primary"):
+            # FIRST: Check if there's any pending answer that hasn't been submitted
+            if answer_input and answer_input.strip():
+                with st.spinner("Processing your pending answer..."):
+                    context = st.session_state.vision_estimate.model_dump() if st.session_state.vision_estimate else {}
+                    refinement, qa_tool_calls = qa_manager.refine(
+                        context=json.dumps(context),
+                        user_input=answer_input,
+                        chat_session=conversation_chat,
+                        available_tools=available_tools
+                    )
+
+                    # Track tool calls
+                    st.session_state.tool_calls_count = st.session_state.get("tool_calls_count", 0) + qa_tool_calls
+
+                    if refinement:
+                        # Store the refinement
+                        if "refinements" not in st.session_state:
+                            st.session_state.refinements = []
+                        st.session_state.refinements.append(refinement)
+
+            # THEN: Generate final calculation with all refinements
+            with st.spinner("Calculating final nutrition breakdown..."):
                 final_response, final_tool_calls = qa_manager.generate_final_calculation(
                     st.session_state.get('conversation_chat', conversation_chat),
-                    available_tools
+                    available_tools,
+                    vision_estimate=st.session_state.get('vision_estimate'),
+                    refinements=st.session_state.get('refinements', [])
                 )
 
                 # Track tool calls
@@ -308,17 +331,38 @@ def main():
 
             data = parsed_data.model_dump()
 
-            # Validate macro sanity (calories ≈ 4p+4c+9f)
-            is_valid, validation_errors = validate_macro_sanity(data)
-            if not is_valid:
-                st.warning("⚠️ Nutritional calculations may be inaccurate:")
-                for error in validation_errors:
-                    st.caption(f"• {error}")
-                st.caption("The AI may have miscalculated. Consider verifying with nutrition labels.")
-
             breakdown_list = data.get("breakdown", [])
+            attribution_list = data.get("attribution", [])
+            validations = data.get("validations", {})
+
+            # Log validation issues (don't display to user to maintain trust)
+            four_four_nine = validations.get("four_four_nine", {})
+            portion_warnings = validations.get("portion_warnings", [])
+
+            # Log 4/4/9 macro validation issues
+            if not four_four_nine.get("ok", True):
+                delta_pct = four_four_nine.get("delta_pct", 0)
+                logger.warning(f"4/4/9 validation failed: calorie calculation off by {delta_pct:.1%} from expected macro ratios")
+
+            # Log portion size warnings
+            if portion_warnings:
+                logger.warning(f"Portion size warnings detected: {len(portion_warnings)} warnings")
+                for warning in portion_warnings:
+                    logger.warning(f"Portion warning: {warning.get('message', 'Unknown portion warning')}")
+
+            # Log legacy validation issues if new validation data is missing
+            if not validations:
+                is_valid, validation_errors = validate_macro_sanity(data)
+                if not is_valid:
+                    logger.warning(f"Legacy validation failed: {validation_errors}")
+                    for error in validation_errors:
+                        logger.warning(f"Legacy validation error: {error}")
+
             if not breakdown_list:
                 st.warning("The AI was unable to provide a breakdown. Please try again.")
+
+            # Create attribution lookup by name
+            attribution_map = {attr.get("name", "").lower(): attr.get("fdc_id") for attr in attribution_list}
 
             total_calories, total_protein, total_carbs, total_fat = 0, 0, 0, 0
             display_data = []
@@ -348,11 +392,30 @@ def main():
                 total_protein += protein
                 total_carbs += carbs
                 total_fat += fat
+
+                # Check if this item has USDA grounding
+                item_name = item.get("item", "N/A")
+                fdc_id = attribution_map.get(item_name.lower())
+
+                # Add USDA badge if grounded
+                if fdc_id:
+                    item_display = f"{item_name} 🏛️"  # USDA badge
+                else:
+                    item_display = item_name
+
                 display_data.append(
-                    {"Item": item.get("item", "N/A"), "Calories": f"{calories} kcal", "Protein": f"{protein}g",
+                    {"Item": item_display, "Calories": f"{calories} kcal", "Protein": f"{protein}g",
                      "Carbs": f"{carbs}g", "Fat": f"{fat}g"})
 
             st.table(display_data)
+
+            # Show USDA attribution info
+            if attribution_list:
+                with st.expander("📊 USDA Data Attribution"):
+                    st.caption("Items marked with 🏛️ are grounded using USDA FoodData Central:")
+                    for attr in attribution_list:
+                        st.caption(f"• {attr.get('name', 'Unknown')}: FDC ID {attr.get('fdc_id', 'N/A')}")
+                    st.caption("Learn more at [USDA FoodData Central](https://fdc.nal.usda.gov/)")
             st.subheader("Calculated Totals", divider='rainbow')
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Total Calories", f"{total_calories} kcal")

@@ -1,7 +1,10 @@
 import google.generativeai as genai
+import json
 from .schemas import RefinementUpdate, VisionEstimate
 from .json_repair import parse_or_repair_json, llm_retry_with_system_hardener
 from .tool_runner import run_with_tools
+from .nutrition_lookup import build_deterministic_breakdown
+from .validators import run_all_validations
 
 
 def load_qa_prompt() -> str:
@@ -53,6 +56,8 @@ def refine(context: str, user_input: str, chat_session: genai.ChatSession, avail
     Returns:
         Tuple of (RefinementUpdate object or None if parsing failed, tool_calls_count)
     """
+    print(f"DEBUG: refine() called with user_input: '{user_input}'")
+
     try:
         # Load prompt template
         base_prompt = load_qa_prompt()
@@ -67,6 +72,8 @@ User input: {user_input}
 Based on this information, provide the JSON response with any updates to ingredients or assumptions.
 """
 
+        print(f"DEBUG: Sending refinement prompt to LLM")
+
         # Send message to chat session with tool support
         if available_tools:
             response_text, tool_calls_count = run_with_tools(chat_session, available_tools, full_prompt)
@@ -75,12 +82,17 @@ Based on this information, provide the JSON response with any updates to ingredi
             response_text = response.text
             tool_calls_count = 0
 
+        print(f"DEBUG: LLM response received, length: {len(response_text)} chars")
+        print(f"DEBUG: LLM response text: {response_text[:500]}...")
+
         # Parse and validate response
+        print(f"DEBUG: Attempting to parse refinement JSON")
         parsed_update, errors = parse_or_repair_json(response_text, RefinementUpdate)
 
         if parsed_update is None and errors:
             # Attempt retry with hardener
-            print(f"Initial parsing failed: {errors}")
+            print(f"ERROR: Initial parsing failed: {errors}")
+            print(f"DEBUG: Attempting retry with hardener")
             if available_tools:
                 hardener_prompt = """
 CRITICAL: Your previous response had JSON parsing errors.
@@ -98,7 +110,8 @@ Please retry the request and provide ONLY the JSON response.
             parsed_update, retry_errors = parse_or_repair_json(retry_response, RefinementUpdate)
 
             if parsed_update is None:
-                print(f"Retry parsing also failed: {retry_errors}")
+                print(f"ERROR: Retry parsing also failed: {retry_errors}")
+                print(f"DEBUG: Retry response was: {retry_response[:500]}...")
                 print(f"Raw response: {retry_response}")
                 return None, tool_calls_count
 
@@ -110,6 +123,14 @@ Please retry the request and provide ONLY the JSON response.
             except:
                 parsed_update.raw_model = {"raw_text": response_text}
 
+            print(f"DEBUG: Successfully parsed refinement")
+            print(f"DEBUG: Updated ingredients: {len(parsed_update.updated_ingredients)}")
+            for ing in parsed_update.updated_ingredients:
+                print(f"DEBUG:   - {ing.name}: {ing.amount}g")
+            print(f"DEBUG: Updated assumptions: {len(parsed_update.updated_assumptions)}")
+        else:
+            print(f"ERROR: parsed_update is None, refinement failed")
+
         return parsed_update, tool_calls_count
 
     except Exception as e:
@@ -117,38 +138,151 @@ Please retry the request and provide ONLY the JSON response.
         return None, 0
 
 
-def generate_final_calculation(chat_session: genai.ChatSession, available_tools: dict = None) -> tuple[str, int]:
+def generate_final_calculation(chat_session: genai.ChatSession, available_tools: dict = None, vision_estimate: VisionEstimate = None, refinements: list = None) -> tuple[str, int]:
     """
-    Generates the final nutritional breakdown in the legacy JSON format
-    for backward compatibility with the existing UI.
+    Generates the final nutritional breakdown using deterministic USDA pipeline.
+    LLM is only used for explanations, not macro calculations.
 
     Args:
         chat_session: Active chat session with full conversation history
         available_tools: Dict mapping tool names to functions for search, etc.
+        vision_estimate: Original vision estimate with ingredients
+        refinements: List of refinement updates from user interactions
 
     Returns:
         Tuple of (JSON string with breakdown format expected by UI, tool_calls_count)
     """
-    final_prompt = """
-Based on our entire conversation, your final and most important task is to act as an expert nutritionist and CALCULATE a detailed nutritional breakdown.
-
-- **Synthesize All Information:** Use every piece of information from our conversation (ingredients, preparation methods, quantities, and any data from web searches) to inform your calculations.
-- **Use Your Internal Knowledge:** For ingredients like "one large chicken breast," or if a web search failed, you must use your internal knowledge to estimate the nutritional values.
-- **Output Format:** You MUST ONLY respond with a single, valid JSON object. Do not include any other text. The object must have a "breakdown" key containing a list of items. Each item must have keys for "item", "calories", "protein_grams", "carbs_grams", and "fat_grams".
-- **Handle Uncertainty:** If, after using all your knowledge and tools, you are still truly unable to calculate a specific value, default that value to 0. But you must try to calculate first.
-
-Example: `{"breakdown": [{"item": "Pan-fried Chicken Kebabs (1 large breast)","calories": 550,"protein_grams": 75,"carbs_grams": 5,"fat_grams": 25}]}`
-
-Now, provide the final JSON response for the meal we discussed.
-"""
+    tool_calls_count = 0
 
     try:
-        if available_tools:
-            response_text, tool_calls_count = run_with_tools(chat_session, available_tools, final_prompt)
-            return response_text, tool_calls_count
-        else:
-            response = chat_session.send_message(final_prompt)
-            return response.text, 0
+        # Step 1: Collect all ingredients from vision estimate and refinements
+        ingredients = []
+
+        if vision_estimate and hasattr(vision_estimate, 'ingredients'):
+            for ingredient in vision_estimate.ingredients:
+                if hasattr(ingredient, 'name') and hasattr(ingredient, 'amount'):
+                    ingredients.append({
+                        "name": ingredient.name,
+                        "amount": ingredient.amount
+                    })
+                elif isinstance(ingredient, dict):
+                    ingredients.append({
+                        "name": ingredient.get('name', ''),
+                        "amount": ingredient.get('amount', 0)
+                    })
+
+        # Apply refinements - Trust the LLM's output completely
+        # The LLM is given full context (original ingredients + questions + answers)
+        # and is smart enough to return the correct updated ingredient list
+        if refinements:
+            print(f"DEBUG: Applying {len(refinements)} refinements")
+            for refinement in refinements:
+                if hasattr(refinement, 'updated_ingredients') and refinement.updated_ingredients:
+                    updated_count = len(refinement.updated_ingredients)
+                    original_count = len(ingredients)
+
+                    print(f"DEBUG: Refinement has {updated_count} ingredients, original had {original_count}")
+
+                    # If LLM returned ALL ingredients, it's a complete replacement (handles corrections)
+                    # If LLM returned fewer, it's a partial update (handles additions/specific changes)
+                    if updated_count >= original_count:
+                        print(f"DEBUG: Complete replacement - LLM provided full updated list")
+                        ingredients = []
+                        for updated_ingredient in refinement.updated_ingredients:
+                            name = updated_ingredient.name if hasattr(updated_ingredient, 'name') else updated_ingredient.get('name', '')
+                            amount = updated_ingredient.amount if hasattr(updated_ingredient, 'amount') else updated_ingredient.get('amount', 0)
+                            ingredients.append({"name": name, "amount": amount})
+                            print(f"DEBUG:   - {name}: {amount}g")
+                    else:
+                        print(f"DEBUG: Partial update - LLM provided specific changes")
+                        for updated_ingredient in refinement.updated_ingredients:
+                            name = updated_ingredient.name if hasattr(updated_ingredient, 'name') else updated_ingredient.get('name', '')
+                            amount = updated_ingredient.amount if hasattr(updated_ingredient, 'amount') else updated_ingredient.get('amount', 0)
+
+                            # Simply add/update - trust LLM knows what it's doing
+                            ingredients.append({"name": name, "amount": amount})
+                            print(f"DEBUG:   - Added/updated: {name}: {amount}g")
+
+        # Step 2: Use deterministic pipeline to compute macros
+        search_fn = available_tools.get('perform_web_search') if available_tools else None
+        deterministic_result, nutrition_tool_calls = build_deterministic_breakdown(ingredients, search_fn)
+
+        tool_calls_count += nutrition_tool_calls  # Accurate tool call count
+
+        # Step 3: Run validations
+        scaled_items = deterministic_result.get('items', [])
+        print(f"DEBUG: Running validations on {len(scaled_items)} scaled items")
+        validations = run_all_validations(scaled_items)
+        print(f"DEBUG: Validation results: {validations}")
+
+        # Step 4: Convert to legacy UI format
+        breakdown_items = []
+        print(f"DEBUG: Converting {len(scaled_items)} items to legacy UI format")
+        for item in scaled_items:
+            breakdown_item = {
+                "item": item["name"],
+                "calories": int(round(item["kcal"])),
+                "protein_grams": int(round(item["protein_g"])),
+                "carbs_grams": int(round(item["carb_g"])),
+                "fat_grams": int(round(item["fat_g"]))
+            }
+            breakdown_items.append(breakdown_item)
+            print(f"DEBUG: Converted item: {breakdown_item}")
+
+        # Step 5: Build complete final JSON with USDA attribution (no confidence score for users)
+        attribution = deterministic_result.get('attribution', [])
+        print(f"DEBUG: Adding {len(attribution)} attribution entries to final JSON")
+
+        final_json_data = {
+            "breakdown": breakdown_items,
+            "attribution": attribution,
+            "validations": {
+                "four_four_nine": validations.get("four_four_nine", {}),
+                "portion_warnings": validations.get("portion_warnings", [])
+                # Note: confidence score excluded from user output
+            }
+        }
+
+        # Step 6: Ask LLM for explanation only (not calculations)
+        explanation_prompt = f"""
+Based on our conversation, I've calculated the nutritional breakdown using USDA data. Here are the results:
+
+{json.dumps(breakdown_items, indent=2)}
+
+Please provide a brief explanation of the assumptions made and suggest one follow-up question if there are any uncertainties.
+Do NOT recalculate or modify any nutritional values - they are final.
+
+Respond with ONLY a JSON object:
+{{
+  "explanation": "brief explanation of assumptions",
+  "follow_up_question": "optional question for user"
+}}
+"""
+
+        try:
+            if available_tools:
+                explanation_response, explanation_tools = run_with_tools(chat_session, available_tools, explanation_prompt)
+                tool_calls_count += explanation_tools
+            else:
+                response = chat_session.send_message(explanation_prompt)
+                explanation_response = response.text
+
+            # Parse the explanation and add to our final data
+            parsed_explanation, _ = parse_or_repair_json(explanation_response, dict)
+            if parsed_explanation:
+                # Add LLM explanation to our deterministic data
+                final_json_data["explanation"] = parsed_explanation.get("explanation", "")
+                final_json_data["follow_up_question"] = parsed_explanation.get("follow_up_question", "")
+
+            return json.dumps(final_json_data), tool_calls_count
+
+        except Exception as e:
+            print(f"Error getting LLM explanation: {e}")
+            # Add empty explanation on error
+            final_json_data["explanation"] = ""
+            final_json_data["follow_up_question"] = ""
+            return json.dumps(final_json_data), tool_calls_count
+
     except Exception as e:
-        print(f"Error generating final calculation: {e}")
-        return '{"breakdown": []}', 0
+        print(f"Error in deterministic final calculation: {e}")
+        return '{"breakdown": []}', tool_calls_count

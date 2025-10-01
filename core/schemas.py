@@ -7,8 +7,8 @@ class Ingredient(BaseModel):
 
     name: str                       # normalized common name (e.g., "chicken thigh")
     amount: float = Field(ge=0)     # numeric amount in grams (provisional estimate), must be >= 0
-    unit: Literal["g"] = "g"        # force grams for now
-    source: Literal["vision","user","default","search"]  # provenance
+    unit: Literal["g", "ml"] = "g"  # grams or milliliters
+    source: Literal["vision","user","default","search","estimation","web"]  # provenance
     notes: str | None = None        # e.g., "boneless, skinless"
 
 

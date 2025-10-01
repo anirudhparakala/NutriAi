@@ -202,8 +202,11 @@ Example 3 - Mixed Vegetable Stir Fry:
 
 Rules:
 - Always provide realistic portion estimates in grams
+- For liquids: convert ml to grams (e.g., 400ml water = 400g, 400ml cola = 400g, 400ml milk = 400g). Always use "g" as unit, never "ml"
 - Include all visible ingredients and reasonable cooking additions (oil, seasonings)
-- Critical questions should focus on high-impact variables (fat content, cooking methods, hidden ingredients)
+- Use "search" as source when using web search results, "vision" for visual estimates, "estimation" for calculated amounts
+- Critical questions should focus on high-impact variables (fat content, cooking methods, hidden ingredients, drink choices)
 - Impact scores: 0.8+ for high-calorie differences, 0.5-0.7 for moderate impact
 - Keep ingredient names simple and standardized
 - If uncertain about quantities, err on the side of typical portions
+- For beverages, always ask critical question about diet vs regular if applicable

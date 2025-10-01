@@ -50,24 +50,41 @@ def normalize_with_web(name: str, search_fn) -> str:
 
         text = " ".join(r.get("content", "") for r in results if isinstance(r, dict))[:5000]
 
-        # Crude pattern matching for known substitutions
+        # Enhanced synonym map for ingredient normalization
         normalization_pairs = [
             ("paneer", "cottage cheese"),
             ("ghee", "clarified butter"),
-            ("jaggery", "brown sugar"),
+            ("jaggery", "cane sugar"),
+            ("maida", "all-purpose flour"),
+            ("curd", "yogurt"),
             ("kimchi", "fermented cabbage"),
             ("tempeh", "fermented soybeans"),
             ("tahini", "sesame seed paste"),
             ("naan", "flatbread"),
             ("biryani", "seasoned rice"),
             ("masala", "spice mix"),
-            ("chutney", "sauce")
+            ("chutney", "sauce"),
+            ("dal", "lentils"),
+            ("besan", "chickpea flour"),
+            ("atta", "whole wheat flour"),
+            ("rajma", "kidney beans"),
+            ("chana", "chickpeas"),
+            ("palak", "spinach"),
+            ("gobi", "cauliflower"),
+            ("aloo", "potato"),
+            ("pyaz", "onion"),
+            ("adrak", "ginger"),
+            ("lehsun", "garlic")
         ]
 
+        # Apply synonym mapping - check both web results and exact matches
         for original, normalized in normalization_pairs:
-            if original in base and normalized in text.lower():
-                print(f"Normalized '{name}' -> '{normalized}' via web search")
-                return normalized
+            # Direct match in base name
+            if original in base:
+                # Confirm via web search if available, otherwise use direct mapping
+                if normalized in text.lower() or not text.strip():
+                    print(f"Normalized '{name}' -> '{normalized}' via synonym mapping")
+                    return normalized
 
         # Try to extract common food terms from search results
         food_terms = re.findall(r'\b(chicken|beef|pork|fish|rice|pasta|bread|cheese|oil|butter|sauce|vegetable|fruit)\b', text.lower())

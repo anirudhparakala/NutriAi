@@ -48,7 +48,10 @@ def init():
 
     con.commit()
     con.close()
-    print(f"Database initialized at {DB_PATH}")
+    # Only log database creation, not every table check
+    if not hasattr(init, '_already_logged'):
+        print(f"Database initialized at {DB_PATH}")
+        init._already_logged = True
 
 
 def log_session(estimate, refinements=None, final_json=None, tool_calls_count=0) -> int:

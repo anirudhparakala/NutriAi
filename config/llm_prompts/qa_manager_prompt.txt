@@ -125,11 +125,94 @@ Context: User mentions the fish was baked not fried, and they used lemon pepper 
   ]
 }
 
+Example 4 - User corrects ingredient type (diet vs regular):
+Context: Vision estimate included "cola" (500g). User says "it's diet cola".
+IMPORTANT: When user corrects a type, you must include BOTH the removal and addition to ensure clean replacement.
+Output ALL ingredients with the correction applied:
+{
+  "updated_ingredients": [
+    {
+      "name": "cheeseburger",
+      "amount": 115,
+      "unit": "g",
+      "source": "vision",
+      "notes": "from original estimate"
+    },
+    {
+      "name": "french fries",
+      "amount": 150,
+      "unit": "g",
+      "source": "vision",
+      "notes": "from original estimate"
+    },
+    {
+      "name": "diet cola",
+      "amount": 500,
+      "unit": "g",
+      "source": "user",
+      "notes": "diet version confirmed by user - replaces regular cola"
+    }
+  ],
+  "updated_assumptions": [
+    {
+      "key": "drink_type",
+      "value": "diet cola",
+      "confidence": 1.0
+    }
+  ]
+}
+
+Example 5 - User answers critical question about chicken part:
+Context: Vision asked "What part of chicken?". User answers "chicken breast, not thigh".
+{
+  "updated_ingredients": [
+    {
+      "name": "chicken breast",
+      "amount": 150,
+      "unit": "g",
+      "source": "user",
+      "notes": "breast confirmed by user, skinless"
+    }
+  ],
+  "updated_assumptions": [
+    {
+      "key": "chicken_part",
+      "value": "breast",
+      "confidence": 1.0
+    }
+  ]
+}
+
+Example 6 - User specifies branded item with web search:
+Context: Vision estimate included "burger". User says "it's a McDonald's Big Mac".
+First call perform_web_search("McDonald's Big Mac nutrition facts")
+Then use search results to provide accurate nutrition:
+{
+  "updated_ingredients": [
+    {
+      "name": "Big Mac",
+      "amount": 219,
+      "unit": "g",
+      "source": "search",
+      "notes": "McDonald's Big Mac - from official nutrition data"
+    }
+  ],
+  "updated_assumptions": [
+    {
+      "key": "restaurant_item",
+      "value": "McDonald's Big Mac",
+      "confidence": 1.0
+    }
+  ]
+}
+
 Rules:
-- Only include ingredients that the user specifically mentioned or corrected
-- Use "user" as the source for all user-provided information
+- CRITICAL REPLACEMENT LOGIC: When user corrects an ingredient type (e.g., "diet cola" instead of "cola"), you MUST output ALL ingredients with the correction applied. This ensures clean replacement.
+- When user answers a critical question, translate that to updated_ingredients with specific details (e.g., "chicken breast" not just "chicken")
+- If user mentions only 1-2 items without corrections, output only those items (partial update)
+- If user is correcting/replacing items, output the COMPLETE ingredient list with corrections
+- Use "user" as source for user-provided info, "search" for web search results, "estimation" for your calculations
 - Set confidence to 1.0 for explicit user confirmations, 0.8-0.9 for implied information
 - Preserve original ingredient amounts unless user specifically corrected them
-- Include new ingredients the user mentions that weren't in the original estimate
-- Update cooking methods, fat types, and preparation details based on user input
 - Keep assumption keys descriptive and consistent
+- When user mentions branded items (McDonald's, Starbucks, etc.), ALWAYS call perform_web_search first before responding
