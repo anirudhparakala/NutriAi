@@ -37,9 +37,9 @@ Put style/brand/method in notes (e.g., Hyderabadi style, deep-fried, McDonald's 
 
 Amounts & units
 
-Use grams for all amount values; set "unit": "g".
+CRITICAL: Use grams for ALL amount values; set "unit": "g" (lowercase). Never use "mL" or "ml" for unit—always convert liquids to grams.
 
-For liquids, use density by class: water-based drinks ~1.00 g/mL, carbonated sugary ~1.03–1.06, dairy milk ~1.03, plant milks ~0.98–1.02, oils ~0.92, syrups/honey ~1.35–1.45, alcoholic 0.79–0.95. If a brand/package is known or weight/volume is printed, prefer that; otherwise use the class default above or perform a single search.
+For liquids, convert volume to grams using density by class: water-based drinks ~1.00 g/mL, carbonated sugary ~1.03–1.06, dairy milk ~1.03, plant milks ~0.98–1.02, oils ~0.92, syrups/honey ~1.35–1.45, alcoholic 0.79–0.95. If a brand/package is known or weight/volume is printed, prefer that; otherwise use the class default above or perform a single search.
 
 If a brand/package is visible or strongly implied, one search to obtain grams; set source: "search" and note the brand/size. Otherwise estimate (vision or estimation).
 

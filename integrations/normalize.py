@@ -1,6 +1,39 @@
 import json
 import re
 
+# Regex to capture diet/zero/unsweetened variants
+VARIANT_RX = re.compile(
+    r'\b(diet|zero|sugar[- ]?free|no\s*sugar|unsweetened|black|plain|skim|nonfat|fat[- ]?free|1%|2%|whole)\b',
+    re.I
+)
+
+
+def _preserve_variants(name: str) -> str:
+    """
+    Extract and preserve variant keywords (diet, zero, unsweetened, etc.)
+    from the ingredient name, returning a searchable form.
+
+    Examples:
+        "cola (diet)" -> "diet cola"
+        "milk (2%)" -> "2% milk"
+        "iced tea (unsweetened)" -> "unsweetened iced tea"
+        "regular chicken" -> "chicken"
+    """
+    raw = name.strip()
+    # Capture any parenthetical parts e.g., "(diet)"
+    paren_parts = re.findall(r'\((.*?)\)', raw)
+    tokens = " ".join(paren_parts + [raw])
+    variants = [m.group(0).lower() for m in VARIANT_RX.finditer(tokens)]
+
+    # Remove parentheses but keep base
+    base = re.sub(r'\(.*?\)', '', raw).strip()
+    base = re.sub(r'\s+', ' ', base)
+
+    if variants:
+        # Prefer "diet cola" style (prefix) for USDA searchability
+        return f"{variants[0]} {base}".strip()
+    return base
+
 
 def normalize_with_web(name: str, search_fn) -> str:
     """
@@ -14,8 +47,8 @@ def normalize_with_web(name: str, search_fn) -> str:
     Returns:
         Normalized ingredient name suitable for USDA lookup
     """
-    # Heuristics: strip brand-ish tokens, parentheses, descriptors
-    base = re.sub(r"\(.*?\)", "", name).lower()
+    # Preserve variants (diet, zero, unsweetened, etc.) before cleaning
+    base = _preserve_variants(name).lower()
     base = re.sub(r"[\d\-]+(g|ml|grams|milliliters)\b", "", base).strip()
     base = re.sub(r"\b(fresh|frozen|canned|organic|free-range|grass-fed|raw|cooked)\b", "", base).strip()
 
@@ -126,8 +159,8 @@ def normalize_ingredient_list(ingredients: list, search_fn=None) -> list:
         if search_fn:
             normalized_name = normalize_with_web(original_name, search_fn)
         else:
-            # Basic normalization without web assistance
-            normalized_name = re.sub(r"\(.*?\)", "", original_name).lower().strip()
+            # Basic normalization without web assistance - preserve variants
+            normalized_name = _preserve_variants(original_name).lower().strip()
 
         # Update the ingredient name
         if hasattr(ingredient, 'name'):

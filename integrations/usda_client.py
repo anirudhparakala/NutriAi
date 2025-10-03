@@ -135,6 +135,7 @@ def _calculate_similarity(query: str, food_description: str) -> float:
     """
     Calculate similarity between query and food description.
     Uses token-based overlap with case/diacritic insensitive comparison.
+    Penalizes descriptions with extra tokens not in the query.
     """
     query_normalized = _normalize_query(query)
     desc_normalized = _normalize_query(food_description)
@@ -149,6 +150,15 @@ def _calculate_similarity(query: str, food_description: str) -> float:
     overlap = len(query_tokens.intersection(desc_tokens))
     overlap_score = overlap / len(query_tokens)
 
+    # Penalize extra tokens in description that aren't in query
+    # Common problematic tokens that change the meaning
+    problematic_extras = {'sweet', 'sweetened', 'salted', 'unsalted', 'smoked', 'cured'}
+    extra_tokens = desc_tokens - query_tokens
+    penalty = 0.0
+    for token in extra_tokens:
+        if token in problematic_extras:
+            penalty += 0.6  # Heavy penalty for meaning-changing modifiers
+
     # Exact term boost - if query contains specific cooking terms
     cooking_terms = ['cooked', 'raw', 'steamed', 'grilled', 'baked', 'fried', 'boiled']
     for term in cooking_terms:
@@ -158,8 +168,9 @@ def _calculate_similarity(query: str, food_description: str) -> float:
     # Sequence similarity as secondary factor
     sequence_sim = SequenceMatcher(None, query_normalized, desc_normalized).ratio()
 
-    # Combine scores (overlap is primary, sequence is secondary)
-    return 0.8 * overlap_score + 0.2 * sequence_sim
+    # Combine scores (overlap is primary, sequence is secondary, minus penalty)
+    final_score = 0.8 * overlap_score + 0.2 * sequence_sim - penalty
+    return max(0.0, final_score)  # Never return negative score
 
 
 def _select_best_match(query: str, foods: List[Dict]) -> Optional[Dict]:

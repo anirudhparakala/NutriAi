@@ -1,5 +1,6 @@
 from typing import TypedDict, Literal, Dict, List, Optional, Any
 from integrations import usda_client, normalize
+import re
 
 # Type definitions for structured data
 class GroundedItem(TypedDict):
@@ -67,6 +68,18 @@ def normalize_and_ground(name: str, search_fn=None) -> tuple[GroundedItem, int]:
             # Extract macros from USDA data
             macros = usda_client.per100g_macros(usda_match)
             print(f"DEBUG: Extracted per100g macros: {macros}")
+
+            # Sanity check: diet/zero beverages should have near-zero calories
+            name_lower = name.lower()
+            variant_keywords = ['diet', 'zero', 'sugar-free', 'sugar free', 'no sugar', 'unsweetened', 'black', 'plain']
+            has_variant = any(kw in name_lower for kw in variant_keywords)
+            is_beverage = any(bev in name_lower for bev in ['cola', 'soda', 'pop', 'drink', 'tea', 'coffee', 'water', 'juice'])
+
+            if has_variant and is_beverage and macros['kcal'] > 10:
+                print(f"WARNING: Beverage '{name}' has variant keyword (diet/zero/unsweetened) but USDA returned {macros['kcal']} kcal/100g")
+                print(f"WARNING: This likely indicates wrong USDA match. Expected near-zero calories for this variant.")
+                print(f"WARNING: Matched description: {usda_match.get('description', 'N/A')}")
+                # Still return the data but log the warning for debugging
 
             fdc_id = usda_match.get('fdcId')
 
