@@ -16,8 +16,9 @@ from core import vision_estimator, qa_manager
 from core.schemas import VisionEstimate
 from core.json_repair import parse_or_repair_json, validate_macro_sanity
 from integrations.search_bridge import create_search_tool_function
-from integrations import db, usda, usda_client
+from integrations import db, usda_client
 from pydantic import BaseModel
+from typing import Optional
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -41,7 +42,6 @@ try:
     USDA_API_KEY = st.secrets.get("USDA_API_KEY")
     if USDA_API_KEY:
         usda_client.set_api_key(USDA_API_KEY)
-        usda.set_api_key(USDA_API_KEY)  # For backward compatibility
     else:
         st.error("USDA API key not found. Phase 2 nutrition lookup requires USDA_API_KEY in your secrets.toml file.", icon="⚠️")
         st.stop()
@@ -266,8 +266,7 @@ def main():
                             st.session_state.refinements = []
                         st.session_state.refinements.append(refinement)
 
-                        # Clear the input after successful submission
-                        st.session_state.answer_input_box = ""
+                        # Rerun to refresh (input will be cleared automatically)
                         st.rerun()
                     else:
                         st.warning("I'm having trouble understanding that. Please try rephrasing (e.g., 'diet cola, medium')")
@@ -321,8 +320,28 @@ def main():
         raw_text = st.session_state.get("final_analysis", "")
         try:
             # Use the same repair logic as the rest of the app
+            # Full Pydantic model with all expected fields
+            class AttributionItem(BaseModel):
+                name: str
+                fdc_id: int
+
+            class ValidationResult(BaseModel):
+                ok: bool = True
+                delta_pct: Optional[float] = None
+                expected: Optional[float] = None
+                actual: Optional[float] = None
+                tolerance: Optional[float] = None
+
+            class Validations(BaseModel):
+                four_four_nine: Optional[ValidationResult] = None
+                portion_warnings: Optional[list[dict]] = None
+                confidence: Optional[float] = None
+                summary: Optional[dict] = None
+
             class FinalBreakdownModel(BaseModel):
                 breakdown: list[dict]
+                attribution: Optional[list[AttributionItem]] = []
+                validations: Optional[Validations] = None
 
             parsed_data, errors = parse_or_repair_json(raw_text, FinalBreakdownModel)
 
@@ -368,26 +387,13 @@ def main():
             display_data = []
 
             for item in breakdown_list:
-                try:
-                    calories = int(item.get("calories"))
-                except (ValueError, TypeError):
-                    calories = 0
+                # Extract as floats (preserve precision until final rounding)
+                calories = float(item.get("calories", 0) or 0.0)
+                protein = float(item.get("protein_grams", 0) or 0.0)
+                carbs = float(item.get("carbs_grams", 0) or 0.0)
+                fat = float(item.get("fat_grams", 0) or 0.0)
 
-                try:
-                    protein = int(item.get("protein_grams"))
-                except (ValueError, TypeError):
-                    protein = 0
-
-                try:
-                    carbs = int(item.get("carbs_grams"))
-                except (ValueError, TypeError):
-                    carbs = 0
-
-                try:
-                    fat = int(item.get("fat_grams"))
-                except (ValueError, TypeError):
-                    fat = 0
-
+                # Accumulate raw values
                 total_calories += calories
                 total_protein += protein
                 total_carbs += carbs
@@ -403,9 +409,14 @@ def main():
                 else:
                     item_display = item_name
 
-                display_data.append(
-                    {"Item": item_display, "Calories": f"{calories} kcal", "Protein": f"{protein}g",
-                     "Carbs": f"{carbs}g", "Fat": f"{fat}g"})
+                # Round only for display (nearest 1g policy)
+                display_data.append({
+                    "Item": item_display,
+                    "Calories": f"{round(calories)} kcal",
+                    "Protein": f"{round(protein)}g",
+                    "Carbs": f"{round(carbs)}g",
+                    "Fat": f"{round(fat)}g",
+                })
 
             st.table(display_data)
 
@@ -418,10 +429,10 @@ def main():
                     st.caption("Learn more at [USDA FoodData Central](https://fdc.nal.usda.gov/)")
             st.subheader("Calculated Totals", divider='rainbow')
             col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Total Calories", f"{total_calories} kcal")
-            col2.metric("Total Protein", f"{total_protein}g")
-            col3.metric("Total Carbs", f"{total_carbs}g")
-            col4.metric("Total Fat", f"{total_fat}g")
+            col1.metric("Total Calories", f"{round(total_calories)} kcal")
+            col2.metric("Total Protein", f"{round(total_protein)}g")
+            col3.metric("Total Carbs", f"{round(total_carbs)}g")
+            col4.metric("Total Fat", f"{round(total_fat)}g")
 
             # Log successful session to database
             if st.session_state.vision_estimate and not st.session_state.get("session_logged", False):

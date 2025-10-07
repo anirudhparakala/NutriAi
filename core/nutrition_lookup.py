@@ -2,6 +2,90 @@ from typing import TypedDict, Literal, Dict, List, Optional, Any
 from integrations import usda_client, normalize
 import re
 
+
+def _passes_critical_nutrition(name_lower: str, per100g: Dict[str, float]) -> bool:
+    """
+    Check if nutrition data makes sense given critical modifiers in the name.
+    Returns False if nutrition contradicts the name (e.g., "diet cola" with 40g sugar).
+
+    Args:
+        name_lower: Lowercase ingredient name
+        per100g: Nutrition data per 100g
+
+    Returns:
+        True if nutrition is consistent with name, False otherwise
+    """
+    kcal = per100g.get("kcal", 0.0) or 0.0
+    fat = per100g.get("fat_g", 0.0) or 0.0
+    carb = per100g.get("carb_g", 0.0) or 0.0
+
+    # Beverages: diet/zero/unsweetened/no sugar
+    if any(k in name_lower for k in ("diet", "zero", "sugar-free", "sugar free", "unsweetened", "no sugar")):
+        if kcal > 10 or carb > 1.5:
+            print(f"DEBUG: Failed beverage check - diet/zero but {kcal} kcal, {carb}g carbs")
+            return False
+
+    # Milk fat percentage
+    if "nonfat" in name_lower or "fat free" in name_lower or "skim" in name_lower:
+        if fat > 0.6:
+            print(f"DEBUG: Failed milk check - nonfat/skim but {fat}g fat")
+            return False
+    elif "1%" in name_lower and "milk" in name_lower:
+        if not (0.4 <= fat <= 1.3):
+            print(f"DEBUG: Failed milk check - 1% milk but {fat}g fat (expected 0.4-1.3)")
+            return False
+    elif "2%" in name_lower and "milk" in name_lower:
+        if not (0.9 <= fat <= 2.4):
+            print(f"DEBUG: Failed milk check - 2% milk but {fat}g fat (expected 0.9-2.4)")
+            return False
+    elif "whole" in name_lower and "milk" in name_lower:
+        if fat < 3.0:
+            print(f"DEBUG: Failed milk check - whole milk but {fat}g fat (expected >= 3.0)")
+            return False
+
+    # Ground meat leanness: e.g., "90% lean" means ~10g fat per 100g
+    m = re.search(r'(\d{2})%\s*lean', name_lower)
+    if m:
+        lean = int(m.group(1))
+        expected_fat = 100 - lean  # approximate fat percentage
+        if abs(fat - expected_fat) > 3:  # tolerance
+            print(f"DEBUG: Failed meat check - {lean}% lean but {fat}g fat (expected ~{expected_fat}g)")
+            return False
+
+    return True
+
+
+def _retry_with_variant_forward(name: str) -> Optional[Dict]:
+    """
+    Retry USDA search with variant keyword moved to front.
+    E.g., "cola (diet)" -> "diet cola"
+
+    Args:
+        name: Original ingredient name
+
+    Returns:
+        USDA match or None
+    """
+    name_lower = name.lower()
+    variant_keywords = ['diet', 'zero', 'sugar-free', 'sugar free', 'no sugar', 'unsweetened',
+                        'nonfat', 'fat free', 'skim', '1%', '2%', 'whole']
+
+    for kw in variant_keywords:
+        if kw in name_lower:
+            # Extract base name (remove parentheses and variant)
+            base = re.sub(r'\([^)]*\)', '', name).strip()
+            base = base.replace(kw, '').strip()
+            variant_forward = f"{kw} {base}"
+
+            print(f"DEBUG: Retry query: '{variant_forward}'")
+            retry_match = usda_client.search_best_match(variant_forward)
+            if retry_match:
+                return retry_match
+            break
+
+    return None
+
+
 # Type definitions for structured data
 class GroundedItem(TypedDict):
     """Item with USDA grounding information."""
@@ -53,9 +137,8 @@ def normalize_and_ground(name: str, search_fn=None) -> tuple[GroundedItem, int]:
             tool_calls_count += 1  # Count actual web search usage
             print(f"DEBUG: Web normalization result: '{name}' -> '{normalized_name}'")
         else:
-            # Basic normalization without web assistance
-            import re
-            normalized_name = re.sub(r"\(.*?\)", "", name).lower().strip()
+            # Basic normalization without web assistance - preserve variants!
+            normalized_name = name.lower().strip()
             print(f"DEBUG: Basic normalization result: '{name}' -> '{normalized_name}'")
 
         # Step 2: Search USDA database
@@ -69,17 +152,28 @@ def normalize_and_ground(name: str, search_fn=None) -> tuple[GroundedItem, int]:
             macros = usda_client.per100g_macros(usda_match)
             print(f"DEBUG: Extracted per100g macros: {macros}")
 
-            # Sanity check: diet/zero beverages should have near-zero calories
-            name_lower = name.lower()
-            variant_keywords = ['diet', 'zero', 'sugar-free', 'sugar free', 'no sugar', 'unsweetened', 'black', 'plain']
-            has_variant = any(kw in name_lower for kw in variant_keywords)
-            is_beverage = any(bev in name_lower for bev in ['cola', 'soda', 'pop', 'drink', 'tea', 'coffee', 'water', 'juice'])
+            # Comprehensive nutrition sanity check
+            if not _passes_critical_nutrition(name.lower(), macros):
+                print(f"WARNING: Nutrition sanity check failed for '{name}'")
+                print(f"WARNING: Matched: {usda_match.get('description', 'N/A')}")
+                print(f"WARNING: Macros: {macros}")
+                print(f"WARNING: Retrying with variant-forward query...")
 
-            if has_variant and is_beverage and macros['kcal'] > 10:
-                print(f"WARNING: Beverage '{name}' has variant keyword (diet/zero/unsweetened) but USDA returned {macros['kcal']} kcal/100g")
-                print(f"WARNING: This likely indicates wrong USDA match. Expected near-zero calories for this variant.")
-                print(f"WARNING: Matched description: {usda_match.get('description', 'N/A')}")
-                # Still return the data but log the warning for debugging
+                # Retry once with variant-forward query
+                retry_match = _retry_with_variant_forward(name)
+                if retry_match:
+                    retry_macros = usda_client.per100g_macros(retry_match)
+                    print(f"DEBUG: Retry match: {retry_match.get('description')} - {retry_macros}")
+
+                    # Use retry result if it passes sanity check
+                    if _passes_critical_nutrition(name.lower(), retry_macros):
+                        print(f"DEBUG: Retry result passed sanity check, using it")
+                        usda_match = retry_match
+                        macros = retry_macros
+                    else:
+                        print(f"WARNING: Retry result also failed sanity check")
+                else:
+                    print(f"WARNING: Retry query found no match")
 
             fdc_id = usda_match.get('fdcId')
 

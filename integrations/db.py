@@ -8,9 +8,13 @@ DB_PATH = "nutri_ai.db"
 
 
 def init():
-    """Initialize the database with required tables."""
+    """Initialize the database with required tables, indices, and WAL mode."""
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
+
+    # Enable WAL mode for better concurrency (one-time setting, persists)
+    cur.execute("PRAGMA journal_mode=WAL;")
+    cur.execute("PRAGMA synchronous=NORMAL;")
 
     # Create sessions table for logging each analysis session
     cur.execute("""CREATE TABLE IF NOT EXISTS sessions (
@@ -45,6 +49,12 @@ def init():
         created_at REAL NOT NULL,
         FOREIGN KEY (session_id) REFERENCES sessions (id)
     )""")
+
+    # Create indices for query performance
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON sessions(created_at);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_dish ON sessions(dish);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_assumptions_session ON assumptions(session_id);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_searches_session ON search_queries(session_id);")
 
     con.commit()
     con.close()

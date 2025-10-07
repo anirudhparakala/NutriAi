@@ -45,10 +45,24 @@ def parse_or_repair_json(text: str, model: Type[T]) -> Tuple[T | None, list[str]
 def _attempt_json_repair(text: str) -> str:
     """
     Attempts to repair common JSON formatting issues in LLM output.
+    Hardened to handle multiple fences and stray backslashes.
     """
-    # Remove markdown code blocks
-    text = re.sub(r'```json\s*', '', text)
-    text = re.sub(r'```\s*$', '', text)
+    # Remove ALL markdown code blocks (not just first/last)
+    # Handle variations: ```json, ```JSON, ``` json, etc.
+    text = re.sub(r'```[a-zA-Z]*\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'```', '', text)
+
+    # Fix stray backslashes that aren't valid JSON escape sequences
+    # Valid JSON escapes: \" \\ \/ \b \f \n \r \t \uXXXX
+    # Replace invalid ones with double backslash
+    def fix_backslashes(match):
+        char_after = match.group(1)
+        if char_after in ('"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u'):
+            return match.group(0)  # Valid escape, keep it
+        else:
+            return '\\\\' + char_after  # Invalid, escape the backslash
+
+    text = re.sub(r'\\(.)', fix_backslashes, text)
 
     # Remove leading/trailing text, find first { to last }
     first_brace = text.find('{')
@@ -86,7 +100,13 @@ Please retry the request and provide ONLY the JSON response.
 """
 
     response = chat.send_message(hardener_prompt + "\n\n" + last_prompt)
-    return response.text
+
+    # Guard against finish_reason=1 or missing text Part
+    try:
+        return response.text
+    except Exception:
+        # Fallback to empty JSON if response has no valid text
+        return "{}"
 
 
 def validate_macro_sanity(breakdown_data: dict, tolerance: float = 0.10) -> Tuple[bool, list[str]]:

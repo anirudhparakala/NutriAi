@@ -4,10 +4,11 @@ import os
 import pickle
 import hashlib
 from functools import lru_cache
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 from difflib import SequenceMatcher
 import time
 import re
+import math
 
 # Global API key storage
 _api_key: Optional[str] = None
@@ -27,6 +28,15 @@ DATA_TYPE_SCORES = {
     "Branded": 1
 }
 
+# Pattern for tokenization
+WORD_RX = re.compile(r"[a-z0-9]+")
+
+# Critical modifiers that change food nutritional properties
+CRITICAL_RX = re.compile(
+    r'\b(diet|zero|sugar[- ]?free|unsweetened|no\s*sugar|nonfat|fat[- ]?free|skim|whole|1%|2%|\d{2}%\s*lean|lean\s*\d{2}%)\b',
+    re.I
+)
+
 
 def set_api_key(key: str) -> None:
     """Set the USDA API key for all requests."""
@@ -40,9 +50,74 @@ def _ensure_cache_dir():
         os.makedirs(CACHE_DIR, exist_ok=True)
 
 
+def _tokens(s: str) -> List[str]:
+    """Extract alphanumeric tokens from a string."""
+    return WORD_RX.findall(s.lower())
+
+
 def _normalize_query(query: str) -> str:
     """Normalize query for consistent caching and comparison."""
-    return re.sub(r'[^\w\s]', '', query.lower().strip())
+    return " ".join(_tokens(query))
+
+
+def _head_token(q: str) -> Optional[str]:
+    """
+    Extract the head (first) token before any parenthesis.
+    Example: "cola (regular)" -> "cola"
+    """
+    base = q.split('(', 1)[0]
+    toks = _tokens(base)
+    return toks[0] if toks else None
+
+
+def _extract_critical_tokens(q: str) -> Set[str]:
+    """
+    Extract critical modifier tokens that affect nutritional properties.
+    Examples: diet, zero, 2%, 90% lean, skim, etc.
+    """
+    toks = set(_tokens(q))
+    crit = set()
+
+    # Check each token against critical patterns
+    for t in toks:
+        if CRITICAL_RX.search(t):
+            crit.add(t)
+
+    # Also keep raw percentage tokens ("2%", "90%")
+    perc = set(re.findall(r'\b\d{1,2}%\b', q.lower()))
+    crit |= set(_tokens(' '.join(perc)))
+
+    return crit
+
+
+def _idf_map(candidates: List[Dict]) -> Dict[str, float]:
+    """
+    Calculate IDF (inverse document frequency) for tokens in candidate list.
+    This helps downweight common/generic terms dynamically without stopword lists.
+    """
+    N = max(1, len(candidates))
+    df: Dict[str, int] = {}
+
+    for c in candidates:
+        dtoks = set(_tokens(c.get("description", "")))
+        for t in dtoks:
+            df[t] = df.get(t, 0) + 1
+
+    # Calculate IDF: log((N + 1) / (df + 1)) + 1.0
+    return {t: math.log((N + 1) / (df[t] + 1)) + 1.0 for t in df}
+
+
+def _bm25_like(query_tokens: List[str], desc_tokens: List[str], idf: Dict[str, float]) -> float:
+    """
+    Simple BM25-like scoring: sum IDF for matched tokens, normalized by query length.
+    Higher scores = better match with downweighting of common terms.
+    """
+    if not query_tokens:
+        return 0.0
+
+    dset = set(desc_tokens)
+    score = sum(idf.get(t, 1.0) for t in query_tokens if t in dset)
+    return score / len(query_tokens)
 
 
 def _cache_key(query: str) -> str:
@@ -134,70 +209,167 @@ def _search_usda_api(query: str, page_size: int = 25) -> Optional[Dict]:
 def _calculate_similarity(query: str, food_description: str) -> float:
     """
     Calculate similarity between query and food description.
-    Uses token-based overlap with case/diacritic insensitive comparison.
-    Penalizes descriptions with extra tokens not in the query.
+    Uses BM25-like scoring with sequence matching.
+    Note: This is kept for backwards compatibility but _select_best_match now does its own scoring.
     """
     query_normalized = _normalize_query(query)
     desc_normalized = _normalize_query(food_description)
 
-    query_tokens = set(query_normalized.split())
-    desc_tokens = set(desc_normalized.split())
+    q_tokens = _tokens(query)
+    d_tokens = _tokens(food_description)
 
-    if not query_tokens:
+    if not q_tokens:
         return 0.0
 
-    # Token overlap score
-    overlap = len(query_tokens.intersection(desc_tokens))
-    overlap_score = overlap / len(query_tokens)
-
-    # Penalize extra tokens in description that aren't in query
-    # Common problematic tokens that change the meaning
-    problematic_extras = {'sweet', 'sweetened', 'salted', 'unsalted', 'smoked', 'cured'}
-    extra_tokens = desc_tokens - query_tokens
-    penalty = 0.0
-    for token in extra_tokens:
-        if token in problematic_extras:
-            penalty += 0.6  # Heavy penalty for meaning-changing modifiers
-
-    # Exact term boost - if query contains specific cooking terms
-    cooking_terms = ['cooked', 'raw', 'steamed', 'grilled', 'baked', 'fried', 'boiled']
-    for term in cooking_terms:
-        if term in query_normalized and term in desc_normalized:
-            overlap_score += 0.1  # Small boost for cooking method match
+    # Simple token overlap
+    overlap = len(set(q_tokens).intersection(set(d_tokens)))
+    overlap_score = overlap / len(q_tokens)
 
     # Sequence similarity as secondary factor
     sequence_sim = SequenceMatcher(None, query_normalized, desc_normalized).ratio()
 
-    # Combine scores (overlap is primary, sequence is secondary, minus penalty)
-    final_score = 0.8 * overlap_score + 0.2 * sequence_sim - penalty
-    return max(0.0, final_score)  # Never return negative score
+    # Combine scores
+    final_score = 0.7 * overlap_score + 0.3 * sequence_sim
+    return max(0.0, final_score)
 
 
-def _select_best_match(query: str, foods: List[Dict]) -> Optional[Dict]:
+def _is_likely_non_food(food: Dict) -> bool:
     """
-    Select the best matching food from search results.
-    Prefers data type (FNDDS > SR Legacy > Branded) and similarity.
+    Detect if a USDA result is likely a spice mix, seasoning, or sauce rather than actual food.
+    Uses nutrition profile heuristics (cuisine-agnostic).
+
+    Indicators of non-food items (spice mixes, seasonings, sauces):
+    - Very high sodium (>5000mg/100g suggests seasoning blend)
+    - Very high carbs with zero protein (>40g carbs, 0g protein suggests spice/starch mix)
+    - Description length (spice mixes often have verbose descriptions)
+    """
+    try:
+        nutrients = food.get('foodNutrients', [])
+
+        # Extract key nutrients
+        sodium_mg = 0.0
+        protein_g = 0.0
+        carb_g = 0.0
+
+        for nutrient in nutrients:
+            nutrient_id = nutrient.get('nutrientId')
+            amount = nutrient.get('amount') or nutrient.get('value', 0.0)
+
+            if nutrient_id == 1093:  # Sodium
+                sodium_mg = float(amount)
+            elif nutrient_id == 1003:  # Protein
+                protein_g = float(amount)
+            elif nutrient_id == 1005:  # Carbs
+                carb_g = float(amount)
+
+        # Heuristic checks
+        # 1. Extremely high sodium (seasoning blends)
+        if sodium_mg > 5000:
+            print(f"DEBUG: Rejecting '{food.get('description')}' - extremely high sodium ({sodium_mg}mg)")
+            return True
+
+        # 2. High carbs with zero protein (spice mixes, pure starches)
+        if carb_g > 40 and protein_g == 0:
+            print(f"DEBUG: Rejecting '{food.get('description')}' - likely spice mix (0g protein, {carb_g}g carbs)")
+            return True
+
+        return False
+
+    except Exception as e:
+        print(f"DEBUG: Error checking food profile: {e}")
+        return False  # Don't reject on error
+
+
+def _select_best_match(query: str, foods: List[Dict], must_tokens: Optional[Set[str]] = None) -> Optional[Dict]:
+    """
+    Select the best matching food from search results using structure-aware scoring.
+
+    Features:
+    - Head-anchoring: requires the first noun of the query to appear in candidates
+    - Critical modifiers: enforces diet/zero/skim/2%/90% lean etc. if present in query
+    - BM25-like scoring: dynamically downweights generic terms without stopword lists
+    - Data type preference: FNDDS > SR Legacy > Branded
+
+    Args:
+        query: Search query
+        foods: List of candidate foods from USDA
+        must_tokens: Optional set of critical modifier tokens that must appear
+
+    Returns:
+        Best matching food or None
     """
     if not foods:
         return None
 
+    head = _head_token(query)
+    q_tokens = _tokens(query)
+    idf = _idf_map(foods)
+
+    # Pattern to detect non-food items in descriptions
+    NONFOOD_PAT = re.compile(
+        r'\b(seasoning|bouillon|broth powder|gravy mix|spice mix|rub|coating|breading|powder)\b',
+        re.I
+    )
+
     best_food = None
-    best_score = -1
+    best_score = -1.0
 
     for food in foods:
-        description = food.get('description', '')
+        desc = food.get('description', '') or ''
         data_type = food.get('dataType', '')
+        d_tokens = _tokens(desc)
 
-        # Calculate similarity score
-        similarity = _calculate_similarity(query, description)
+        # Skip obvious non-foods unless explicitly asked
+        if NONFOOD_PAT.search(desc) and not NONFOOD_PAT.search(query):
+            print(f"DEBUG: Skipping non-food item: {desc}")
+            continue
 
-        # Add data type preference bonus
-        type_bonus = DATA_TYPE_SCORES.get(data_type, 0) * 0.1
+        # Skip if likely a spice mix/seasoning based on nutrition
+        if _is_likely_non_food(food):
+            continue
 
-        final_score = similarity + type_bonus
+        # 1) HEAD ANCHOR: candidate must contain the head noun (prevents "cola" -> "tofu")
+        if head and head not in d_tokens:
+            continue
 
-        if final_score > best_score:
-            best_score = final_score
+        # 2) CRITICAL MODIFIERS: all must appear (handles diet/zero, 1%/2%, 90% lean, etc.)
+        if must_tokens:
+            # Check if all critical tokens are in description tokens
+            # Special handling for percentages which might be formatted differently
+            has_all_critical = True
+            for mt in must_tokens:
+                if mt not in d_tokens:
+                    # For percentage tokens, also check if they appear in original description
+                    if '%' in mt and mt not in desc.lower():
+                        has_all_critical = False
+                        break
+                    elif '%' not in mt:
+                        has_all_critical = False
+                        break
+
+            if not has_all_critical:
+                continue
+
+        # 3) SCORE: BM25-like over tokens + sequence similarity + dataType preference + penalties
+        bm25 = _bm25_like(q_tokens, d_tokens, idf)
+        seq = SequenceMatcher(None, _normalize_query(query), _normalize_query(desc)).ratio()
+        dtype_bonus = DATA_TYPE_SCORES.get(data_type, 0) * 0.1
+
+        # Penalty for extra tokens in description (prevents "fries" -> "sweet potato fries")
+        # and missing tokens in description (ensures query terms are matched)
+        q_set = set(q_tokens)
+        d_set = set(d_tokens)
+        extra = d_set - q_set  # tokens in description but not in query
+        missing = q_set - d_set  # tokens in query but not in description
+
+        # IDF-weighted penalties (generic - no stopword lists needed)
+        extra_penalty = 0.3 * sum(idf.get(t, 1.0) for t in extra)
+        missing_penalty = 0.2 * sum(idf.get(t, 1.0) for t in missing)
+
+        score = 0.75 * bm25 + 0.25 * seq + dtype_bonus - extra_penalty - missing_penalty
+
+        if score > best_score:
+            best_score = score
             best_food = food
 
     return best_food
@@ -206,6 +378,7 @@ def _select_best_match(query: str, foods: List[Dict]) -> Optional[Dict]:
 def search_best_match(query: str) -> Optional[Dict]:
     """
     Search for the best matching food in USDA database.
+    Uses multi-strategy search with critical modifier extraction.
 
     Args:
         query: Food name to search for
@@ -217,23 +390,61 @@ def search_best_match(query: str) -> Optional[Dict]:
         return None
 
     try:
-        # Search USDA API
-        result = _search_usda_api(query.strip())
+        query_clean = query.strip()
+        critical_tokens = _extract_critical_tokens(query_clean)
 
-        if not result or 'foods' not in result:
-            return None
+        # Strategy 1: Try exact query as provided (preserves all qualifiers)
+        print(f"DEBUG: USDA search strategy 1 - trying '{query_clean}'")
+        result = _search_usda_api(query_clean)
 
-        foods = result['foods']
-        if not foods:
-            return None
+        if result and 'foods' in result and result['foods']:
+            best_match = _select_best_match(query_clean, result['foods'], must_tokens=critical_tokens)
+            if best_match and _calculate_similarity(query_clean, best_match.get('description', '')) > 0.5:
+                print(f"USDA match for '{query_clean}': {best_match.get('description', 'Unknown')} (FDC: {best_match.get('fdcId', 'N/A')})")
+                return best_match
 
-        # Select best match
-        best_match = _select_best_match(query, foods)
+        # Strategy 2: If query has parentheses, try base-before-parens first, then no-parens
+        if '(' in query_clean:
+            # 2a: Try just the base before parentheses (e.g., "cola (diet)" -> "cola")
+            base_before = query_clean.split('(', 1)[0].strip()
+            if base_before:
+                print(f"DEBUG: USDA search strategy 2a - trying base before parens '{base_before}'")
+                result = _search_usda_api(base_before)
+                if result and result.get('foods'):
+                    best_match = _select_best_match(base_before, result['foods'], must_tokens=critical_tokens)
+                    if best_match and _calculate_similarity(base_before, best_match.get('description', '')) > 0.5:
+                        print(f"USDA match for '{base_before}': {best_match.get('description', 'Unknown')} (FDC: {best_match.get('fdcId', 'N/A')})")
+                        return best_match
 
-        if best_match:
-            print(f"USDA match for '{query}': {best_match.get('description', 'Unknown')} (FDC: {best_match.get('fdcId', 'N/A')})")
+            # 2b: Try removing parentheses (e.g., "cola (diet)" -> "cola diet")
+            query_no_parens = re.sub(r'[()]', ' ', query_clean)
+            query_no_parens = re.sub(r'\s+', ' ', query_no_parens).strip()
+            print(f"DEBUG: USDA search strategy 2b - trying without parentheses '{query_no_parens}'")
 
-        return best_match
+            result = _search_usda_api(query_no_parens)
+            if result and 'foods' in result and result['foods']:
+                best_match = _select_best_match(query_no_parens, result['foods'], must_tokens=critical_tokens)
+                if best_match and _calculate_similarity(query_no_parens, best_match.get('description', '')) > 0.5:
+                    print(f"USDA match for '{query_no_parens}': {best_match.get('description', 'Unknown')} (FDC: {best_match.get('fdcId', 'N/A')})")
+                    return best_match
+
+        # Strategy 3: Try just the base ingredient (first 1-2 words before any qualifiers)
+        # Head-anchoring in _select_best_match prevents bad matches like "cola" -> "tofu"
+        base_words = query_clean.split()[:2]
+        if len(base_words) > 0:
+            query_base = ' '.join(base_words)
+            print(f"DEBUG: USDA search strategy 3 - trying base form '{query_base}'")
+
+            result = _search_usda_api(query_base)
+            if result and 'foods' in result and result['foods']:
+                best_match = _select_best_match(query_base, result['foods'], must_tokens=critical_tokens)
+                # Require similarity > 0.45 to avoid bad tail matches
+                if best_match and _calculate_similarity(query_base, best_match.get('description', '')) > 0.45:
+                    print(f"USDA match for '{query_base}': {best_match.get('description', 'Unknown')} (FDC: {best_match.get('fdcId', 'N/A')})")
+                    return best_match
+
+        print(f"WARNING: No USDA match found for '{query_clean}' after trying all strategies")
+        return None
 
     except Exception as e:
         print(f"Error searching USDA for '{query}': {e}")

@@ -1,8 +1,28 @@
 import json
+from typing import Any, Callable, Dict, List, Tuple, Union
 import google.generativeai as genai
 
 
-def run_with_tools(chat: genai.ChatSession, available_tools: dict, user_msg: str | list):
+# Safety cap to prevent infinite tool-call loops
+MAX_ROUNDS = 8
+
+
+def _jsonify_for_function_response(obj: Any) -> Any:
+    """
+    Ensure tool results are JSON-serializable before sending back to model.
+    Handles non-serializable types (set, bytes, custom objects).
+    """
+    try:
+        return json.loads(json.dumps(obj, default=str))
+    except Exception:
+        return {"content": str(obj)}
+
+
+def run_with_tools(
+    chat: genai.ChatSession,
+    available_tools: Dict[str, Callable[..., Any]],
+    user_msg: Union[str, List[Any]],
+) -> Tuple[str, int]:
     """
     Send user_msg; if the model issues tool calls, execute them and feed results back until content returns.
 
@@ -16,9 +36,28 @@ def run_with_tools(chat: genai.ChatSession, available_tools: dict, user_msg: str
     """
     resp = chat.send_message(user_msg)
     tool_calls_count = 0
+    rounds = 0
 
     # Handle tool calls in a loop until we get regular content
     while True:
+        rounds += 1
+        if rounds > MAX_ROUNDS:
+            print("WARNING: Max tool-call rounds reached; returning best-effort content.")
+            # Extract best-effort content from current response
+            parts = []
+            for candidate in resp.candidates:
+                if hasattr(candidate, 'content') and candidate.content and candidate.content.parts:
+                    parts.extend(candidate.content.parts)
+            final_text = "{}"
+            if parts:
+                for part in parts:
+                    if hasattr(part, 'json') and part.json:
+                        final_text = json.dumps(part.json)
+                        break
+                    if hasattr(part, 'text') and part.text and part.text.strip():
+                        final_text = part.text
+                        break
+            return final_text, tool_calls_count
         # Extract all parts from the response
         parts = []
         for candidate in resp.candidates:
@@ -33,26 +72,36 @@ def run_with_tools(chat: genai.ChatSession, available_tools: dict, user_msg: str
 
         if not function_calls:
             # No more function calls, extract final text content
-            final_text = resp.text
+            final_text = ""
+
+            # Try to get text from response
+            try:
+                final_text = resp.text
+            except Exception:
+                # resp.text failed (finish_reason=1, no valid Part, etc.)
+                pass
 
             # Graceful fallback for non-text replies
             if not final_text or final_text.strip() == "":
-                # Look for any text or JSON parts to return
+                # Prefer JSON parts over text (boosts structured returns)
                 for part in parts:
+                    if hasattr(part, 'json') and part.json:
+                        final_text = json.dumps(part.json)
+                        break
                     if hasattr(part, 'text') and part.text and part.text.strip():
                         final_text = part.text
                         break
-                    elif hasattr(part, 'json') and part.json:
-                        final_text = json.dumps(part.json)
-                        break
 
-                # If still empty, provide a fallback
+                # If still empty, provide JSON-parseable fallback (not prose)
+                # This prevents downstream JSON parsing errors
                 if not final_text or final_text.strip() == "":
-                    final_text = "Analysis completed successfully."
+                    final_text = "{}"
+                    print("WARNING: LLM returned empty response, using empty JSON object fallback")
 
             return final_text, tool_calls_count
 
-        # Execute all function calls and send responses back
+        # Execute all function calls and batch responses
+        responses = []
         for call in function_calls:
             tool_name = call.name
             tool_args = dict(call.args)  # Convert from Gemini's args format
@@ -64,36 +113,40 @@ def run_with_tools(chat: genai.ChatSession, available_tools: dict, user_msg: str
                     tool_result = available_tools[tool_name](**tool_args)
                     print(f"Tool executed: {tool_name}({tool_args}) -> {len(str(tool_result))} chars")
                 except Exception as e:
-                    tool_result = json.dumps({"error": f"Tool execution failed: {e}"})
+                    tool_result = {"error": f"Tool execution failed: {e}"}
                     print(f"Tool execution error: {tool_name} failed with {e}")
             else:
-                tool_result = json.dumps({"error": f"Unknown tool: {tool_name}"})
+                tool_result = {"error": f"Unknown tool: {tool_name}"}
                 print(f"Unknown tool requested: {tool_name}")
 
-            # Send tool response back to the model with SDK-compatible format
-            try:
-                # Try the structured format first (newer SDK versions)
-                resp = chat.send_message(
-                    [genai.protos.Part(
-                        function_response=genai.protos.FunctionResponse(
-                            name=tool_name,
-                            response={"content": tool_result},
-                        )
-                    )]
+            # Ensure tool result is JSON-serializable
+            tool_result = _jsonify_for_function_response(tool_result)
+
+            # Wrap list results in a dict (Gemini FunctionResponse requires dict)
+            if isinstance(tool_result, list):
+                tool_result = {"results": tool_result}
+
+            # Add to batch of responses
+            responses.append(genai.protos.Part(
+                function_response=genai.protos.FunctionResponse(
+                    name=tool_name,
+                    response=tool_result
                 )
-            except Exception as e:
-                # Fallback format for SDK compatibility
-                try:
-                    resp = chat.send_message([{
-                        "function_response": {
-                            "name": tool_name,
-                            "response": {"content": tool_result}
-                        }
-                    }])
-                except Exception as e2:
-                    print(f"SDK compatibility error: {e2}")
-                    # Simple text fallback
-                    resp = chat.send_message(f"Tool {tool_name} returned: {tool_result}")
+            ))
+
+        # Send all tool responses back in a single message (reduces round-trips)
+        try:
+            resp = chat.send_message(responses)
+        except Exception as e:
+            print(f"Batch tool response error: {e}")
+            # Fallback: send as JSON-ish text
+            fallback_data = {
+                "tool_fallback": {
+                    resp_part.function_response.name: resp_part.function_response.response
+                    for resp_part in responses
+                }
+            }
+            resp = chat.send_message(json.dumps(fallback_data, default=str))
 
 
 def run_with_tools_and_parse(chat: genai.ChatSession, available_tools: dict, user_msg: str | list,

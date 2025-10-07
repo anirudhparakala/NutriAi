@@ -1,38 +1,33 @@
 import json
 import re
 
-# Regex to capture diet/zero/unsweetened variants
-VARIANT_RX = re.compile(
-    r'\b(diet|zero|sugar[- ]?free|no\s*sugar|unsweetened|black|plain|skim|nonfat|fat[- ]?free|1%|2%|whole)\b',
-    re.I
-)
 
-
-def _preserve_variants(name: str) -> str:
+def _minimal_normalize(name: str) -> str:
     """
-    Extract and preserve variant keywords (diet, zero, unsweetened, etc.)
-    from the ingredient name, returning a searchable form.
+    Minimal normalization that preserves all semantic qualifiers.
+    Only removes: units, measurements, and extreme noise.
+
+    Philosophy: Keep everything that might matter for USDA lookup.
+    Let USDA's own search handle synonyms and variants.
 
     Examples:
-        "cola (diet)" -> "diet cola"
-        "milk (2%)" -> "2% milk"
-        "iced tea (unsweetened)" -> "unsweetened iced tea"
-        "regular chicken" -> "chicken"
+        "cola (diet)" -> "cola (diet)"
+        "rendang (beef)" -> "rendang (beef)"
+        "jollof rice (party style)" -> "jollof rice (party style)"
+        "milk 500ml (2%)" -> "milk (2%)"
     """
-    raw = name.strip()
-    # Capture any parenthetical parts e.g., "(diet)"
-    paren_parts = re.findall(r'\((.*?)\)', raw)
-    tokens = " ".join(paren_parts + [raw])
-    variants = [m.group(0).lower() for m in VARIANT_RX.finditer(tokens)]
+    cleaned = name.strip()
 
-    # Remove parentheses but keep base
-    base = re.sub(r'\(.*?\)', '', raw).strip()
-    base = re.sub(r'\s+', ' ', base)
+    # Only remove explicit weight/volume measurements (not descriptors)
+    cleaned = re.sub(r'\b\d+[\s]?(g|ml|grams|milliliters|oz|fl\.?\s?oz)\b', '', cleaned, flags=re.I)
 
-    if variants:
-        # Prefer "diet cola" style (prefix) for USDA searchability
-        return f"{variants[0]} {base}".strip()
-    return base
+    # Remove brand markers but keep everything else
+    cleaned = re.sub(r'[®™©]', '', cleaned)
+
+    # Collapse multiple spaces
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+
+    return cleaned
 
 
 def normalize_with_web(name: str, search_fn) -> str:
@@ -47,10 +42,8 @@ def normalize_with_web(name: str, search_fn) -> str:
     Returns:
         Normalized ingredient name suitable for USDA lookup
     """
-    # Preserve variants (diet, zero, unsweetened, etc.) before cleaning
-    base = _preserve_variants(name).lower()
-    base = re.sub(r"[\d\-]+(g|ml|grams|milliliters)\b", "", base).strip()
-    base = re.sub(r"\b(fresh|frozen|canned|organic|free-range|grass-fed|raw|cooked)\b", "", base).strip()
+    # Start with minimal normalization - keep all qualifiers
+    base = _minimal_normalize(name).lower()
 
     # Check if web assistance is needed
     needs_web_help = (
@@ -66,66 +59,17 @@ def normalize_with_web(name: str, search_fn) -> str:
     # Web assist: query for common name
     try:
         query = f"common name for '{base}' food ingredient nutrition"
-        search_result = search_fn(query=query)
-
-        # Handle error responses from search function
-        if isinstance(search_result, str) and search_result.startswith("Error"):
-            print(f"Search error for '{name}': {search_result}")
-            return base
-
-        # Parse search results - expecting JSON string with list of {"content": "..."} objects
-        results = json.loads(search_result)
+        results = search_fn(query=query)  # Now returns Python list directly
 
         # Ensure results is a list
         if not isinstance(results, list):
-            print(f"Unexpected search result format for '{name}': expected list, got {type(results)}")
+            print(f"Unexpected search result format for '{name}': {type(results)}")
             return base
 
-        text = " ".join(r.get("content", "") for r in results if isinstance(r, dict))[:5000]
-
-        # Enhanced synonym map for ingredient normalization
-        normalization_pairs = [
-            ("paneer", "cottage cheese"),
-            ("ghee", "clarified butter"),
-            ("jaggery", "cane sugar"),
-            ("maida", "all-purpose flour"),
-            ("curd", "yogurt"),
-            ("kimchi", "fermented cabbage"),
-            ("tempeh", "fermented soybeans"),
-            ("tahini", "sesame seed paste"),
-            ("naan", "flatbread"),
-            ("biryani", "seasoned rice"),
-            ("masala", "spice mix"),
-            ("chutney", "sauce"),
-            ("dal", "lentils"),
-            ("besan", "chickpea flour"),
-            ("atta", "whole wheat flour"),
-            ("rajma", "kidney beans"),
-            ("chana", "chickpeas"),
-            ("palak", "spinach"),
-            ("gobi", "cauliflower"),
-            ("aloo", "potato"),
-            ("pyaz", "onion"),
-            ("adrak", "ginger"),
-            ("lehsun", "garlic")
-        ]
-
-        # Apply synonym mapping - check both web results and exact matches
-        for original, normalized in normalization_pairs:
-            # Direct match in base name
-            if original in base:
-                # Confirm via web search if available, otherwise use direct mapping
-                if normalized in text.lower() or not text.strip():
-                    print(f"Normalized '{name}' -> '{normalized}' via synonym mapping")
-                    return normalized
-
-        # Try to extract common food terms from search results
-        food_terms = re.findall(r'\b(chicken|beef|pork|fish|rice|pasta|bread|cheese|oil|butter|sauce|vegetable|fruit)\b', text.lower())
-        if food_terms:
-            # Return the most common food term found
-            most_common = max(set(food_terms), key=food_terms.count)
-            print(f"Normalized '{name}' -> '{most_common}' via web search pattern")
-            return most_common
+        # Web assist is available but we DON'T want to destructively rename
+        # Preserve the original dish name - this keeps cultural/cuisine specificity
+        # Only use web search for validation, not replacement
+        print(f"Web search available for '{name}' but preserving original name for cultural specificity")
 
     except Exception as e:
         print(f"Web normalization failed for '{name}': {e}")
@@ -159,8 +103,8 @@ def normalize_ingredient_list(ingredients: list, search_fn=None) -> list:
         if search_fn:
             normalized_name = normalize_with_web(original_name, search_fn)
         else:
-            # Basic normalization without web assistance - preserve variants
-            normalized_name = _preserve_variants(original_name).lower().strip()
+            # Basic normalization without web assistance - minimal cleaning only
+            normalized_name = _minimal_normalize(original_name).lower().strip()
 
         # Update the ingredient name
         if hasattr(ingredient, 'name'):
@@ -176,6 +120,7 @@ def normalize_ingredient_list(ingredients: list, search_fn=None) -> list:
 def suggest_usda_search_terms(ingredient_name: str) -> list[str]:
     """
     Generate multiple search terms for USDA lookup based on ingredient name.
+    Variant-first ordering to get best hit on first try.
 
     Args:
         ingredient_name: Normalized ingredient name
@@ -184,9 +129,20 @@ def suggest_usda_search_terms(ingredient_name: str) -> list[str]:
         List of search terms to try for USDA lookup, ordered by specificity
     """
     base_name = ingredient_name.lower().strip()
+    terms = [base_name]
 
-    # Start with the exact name
-    search_terms = [base_name]
+    # Detect common variants and create variant-first term
+    VARS = ["diet", "zero", "sugar-free", "sugar free", "unsweetened", "black", "plain", "1%", "2%", "whole"]
+    variant = next((v for v in VARS if v in base_name), None)
+
+    if variant:
+        # Make a prefixed variant form: "diet cola", "1% milk", etc.
+        core = base_name.replace("(", " ").replace(")", " ").strip()
+        # Keep only one space
+        core = re.sub(r"\s+", " ", core)
+        # Insert variant-first term at the front so it's tried first
+        variant_first = f"{variant} " + core.replace(variant, "").strip()
+        terms.insert(0, variant_first)
 
     # Add variations
     variations = [
@@ -212,8 +168,8 @@ def suggest_usda_search_terms(ingredient_name: str) -> list[str]:
     # Remove duplicates while preserving order
     seen = set()
     unique_terms = []
-    for term in search_terms + variations:
-        if term not in seen:
+    for term in terms + variations:
+        if term and term not in seen:
             seen.add(term)
             unique_terms.append(term)
 

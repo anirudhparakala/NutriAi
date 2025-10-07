@@ -1,5 +1,5 @@
 from typing import Dict, List, Any, Union
-from core.nutrition_lookup import ScaledItem
+from .nutrition_lookup import ScaledItem
 
 # Default portion bound heuristics (editable)
 PORTION_BOUNDS = {

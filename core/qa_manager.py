@@ -1,10 +1,11 @@
 import google.generativeai as genai
 import json
-from .schemas import RefinementUpdate, VisionEstimate
+from .schemas import RefinementUpdate, VisionEstimate, Explanation
 from .json_repair import parse_or_repair_json, llm_retry_with_system_hardener
 from .tool_runner import run_with_tools
 from .nutrition_lookup import build_deterministic_breakdown
 from .validators import run_all_validations
+from .portion_resolver import resolve_portions
 
 
 def load_qa_prompt() -> str:
@@ -75,12 +76,8 @@ Based on this information, provide the JSON response with any updates to ingredi
         print(f"DEBUG: Sending refinement prompt to LLM")
 
         # Send message to chat session with tool support
-        if available_tools:
-            response_text, tool_calls_count = run_with_tools(chat_session, available_tools, full_prompt)
-        else:
-            response = chat_session.send_message(full_prompt)
-            response_text = response.text
-            tool_calls_count = 0
+        # Always route through run_with_tools for consistent error handling
+        response_text, tool_calls_count = run_with_tools(chat_session, available_tools or {}, full_prompt)
 
         print(f"DEBUG: LLM response received, length: {len(response_text)} chars")
         print(f"DEBUG: LLM response text: {response_text[:500]}...")
@@ -194,16 +191,47 @@ def generate_final_calculation(chat_session: genai.ChatSession, available_tools:
                             ingredients.append({"name": name, "amount": amount})
                             print(f"DEBUG:   - {name}: {amount}g")
                     else:
-                        print(f"DEBUG: Partial update - LLM provided specific changes")
+                        print(f"DEBUG: Partial update - merging specific changes")
                         for updated_ingredient in refinement.updated_ingredients:
                             name = updated_ingredient.name if hasattr(updated_ingredient, 'name') else updated_ingredient.get('name', '')
                             amount = updated_ingredient.amount if hasattr(updated_ingredient, 'amount') else updated_ingredient.get('amount', 0)
 
-                            # Simply add/update - trust LLM knows what it's doing
-                            ingredients.append({"name": name, "amount": amount})
-                            print(f"DEBUG:   - Added/updated: {name}: {amount}g")
+                            # Find and replace by fuzzy matching (handles variants like "cola" -> "cola (diet)")
+                            name_lower = name.lower()
+                            found = False
+                            for i, existing in enumerate(ingredients):
+                                existing_name = existing.get('name', '').lower()
 
-        # Step 2: Use deterministic pipeline to compute macros
+                                # Exact match
+                                if existing_name == name_lower:
+                                    ingredients[i] = {"name": name, "amount": amount}
+                                    print(f"DEBUG:   - Replaced (exact): {name}: {amount}g")
+                                    found = True
+                                    break
+
+                                # Variant match: check if one is a variant of the other
+                                # E.g., "cola" matches "cola (diet)", "milk" matches "milk (2%)"
+                                existing_base = existing_name.split('(')[0].strip()
+                                new_base = name_lower.split('(')[0].strip()
+
+                                if existing_base == new_base:
+                                    # Same base ingredient, replace with the more specific variant
+                                    ingredients[i] = {"name": name, "amount": amount}
+                                    print(f"DEBUG:   - Replaced (variant): '{existing.get('name')}' with '{name}': {amount}g")
+                                    found = True
+                                    break
+
+                            if not found:
+                                # New ingredient, append it
+                                ingredients.append({"name": name, "amount": amount})
+                                print(f"DEBUG:   - Added new: {name}: {amount}g")
+
+        # Step 2: Resolve portions deterministically (prevents LLM from inventing grams)
+        print(f"DEBUG: Resolving portions for {len(ingredients)} ingredients")
+        ingredients = resolve_portions(ingredients)
+        print(f"DEBUG: Portions resolved")
+
+        # Step 3: Use deterministic pipeline to compute macros
         search_fn = available_tools.get('perform_web_search') if available_tools else None
         deterministic_result, nutrition_tool_calls = build_deterministic_breakdown(ingredients, search_fn)
 
@@ -260,19 +288,16 @@ Respond with ONLY a JSON object:
 """
 
         try:
-            if available_tools:
-                explanation_response, explanation_tools = run_with_tools(chat_session, available_tools, explanation_prompt)
-                tool_calls_count += explanation_tools
-            else:
-                response = chat_session.send_message(explanation_prompt)
-                explanation_response = response.text
+            # Always route through run_with_tools for consistent error handling
+            explanation_response, explanation_tools = run_with_tools(chat_session, available_tools or {}, explanation_prompt)
+            tool_calls_count += explanation_tools
 
-            # Parse the explanation and add to our final data
-            parsed_explanation, _ = parse_or_repair_json(explanation_response, dict)
+            # Parse the explanation with proper schema validation
+            parsed_explanation, _ = parse_or_repair_json(explanation_response, Explanation)
             if parsed_explanation:
                 # Add LLM explanation to our deterministic data
-                final_json_data["explanation"] = parsed_explanation.get("explanation", "")
-                final_json_data["follow_up_question"] = parsed_explanation.get("follow_up_question", "")
+                final_json_data["explanation"] = parsed_explanation.explanation
+                final_json_data["follow_up_question"] = parsed_explanation.follow_up_question
 
             return json.dumps(final_json_data), tool_calls_count
 

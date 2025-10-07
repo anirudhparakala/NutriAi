@@ -66,13 +66,9 @@ def estimate(image_bytes: bytes, model: genai.GenerativeModel, available_tools: 
         image = Image.open(io.BytesIO(image_bytes))
 
         # Create chat session and send message with tool support
+        # Always route through run_with_tools for consistent error handling
         chat = model.start_chat()
-        if available_tools:
-            response_text, tool_calls_count = run_with_tools(chat, available_tools, [prompt, image])
-        else:
-            response = chat.send_message([prompt, image])
-            response_text = response.text
-            tool_calls_count = 0
+        response_text, tool_calls_count = run_with_tools(chat, available_tools or {}, [prompt, image])
 
         # Parse and validate response
         parsed_estimate, errors = parse_or_repair_json(response_text, VisionEstimate)
