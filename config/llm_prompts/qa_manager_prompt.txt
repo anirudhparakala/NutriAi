@@ -10,12 +10,19 @@ Output (JSON only, no prose, no comments)
 
 {
   "updated_ingredients": [
-    {"name": "string", "amount": number, "unit": "g", "source": "user|search|vision|estimation", "notes": "string or null"}
+    {"name": "string", "amount": number|null, "unit": "g", "source": "user|search|vision|estimation|portion-resolver", "portion_label": "string or null", "notes": "string or null"}
   ],
   "updated_assumptions": [
     {"key": "string", "value": "string", "confidence": number}
   ]
 }
+
+**Critical questions output requirements:**
+
+When you need follow-up details for a question, include a `follow_up_prompt`:
+- Required when: option implies specification (brand, scoop size, milk fat %, lean %, restaurant vs homemade, oil type, sweetener type, protein cuts)
+- Example: If question offers "specify" option for scoop brand → include `"follow_up_prompt": "Which brand of protein powder?"`
+- The prompt should be specific, short, and guide the user to provide the exact detail needed
 
 
 Transformation policy (universal, cuisine-agnostic)
@@ -23,8 +30,24 @@ Transformation policy (universal, cuisine-agnostic)
 Answers must change ingredients, not just assumptions
 Use the user's replies to rename, add, remove, and re-weight items so that updated_ingredients alone reflects the final truth. updated_assumptions is metadata; do not depend on it for downstream correctness.
 
-Answer mapping
-Map comma-separated user answers to critical_questions in array order (answer 1 → question 1, etc.). Use the question id to decide which ingredient to update (e.g., id "fries_size" → update fries; id "drink_variant" → update drink). If the user provides more answers than questions, use the first N and ignore the rest. If the user provides fewer answers, map to the first K questions and leave other items unchanged (or resolve with defaults if the context makes it safe). If an answer like "regular" isn't one of the question's options, select the question's default value for that question.
+Answer mapping (STRICT)
+
+**Answers are supplied as a dictionary keyed by `question.id`**. Use the `id` to map answers to the correct ingredient/question. Do NOT infer order from commas or positions.
+
+Example input format:
+```json
+{
+  "fries_size": "large",
+  "drink_variant": "diet",
+  "protein_type": "chicken"
+}
+```
+
+For each answer:
+- Use `question.id` to identify which ingredient/aspect to update
+- If answer doesn't match any option, use the question's `default` value
+- If an `id` is missing from answers, leave that aspect unchanged or apply default if safe
+- Ignore any extra keys not matching known question IDs
 
 Canonical names (USDA-friendly)
 Ensure each name is a concise, generic yet specific label common in databases (e.g., chicken biryani, basmati rice (cooked), paneer, olive oil, cola, milk (2%), almond milk, lemon-lime soda, protein powder (whey)). Put style/brand/size in notes. notes should be null when empty (not an empty string). Order items as: mains → sides → sauces/oils → beverages → desserts.
@@ -104,7 +127,7 @@ No generic unresolved items (e.g., bare “soda”, “milk”, “oil”, “sa
 
 Names are human-readable and specific enough to distinguish variants (e.g., cola vs diet cola; milk (2%) vs almond milk; veg biryani vs chicken biryani).
 
-Every item has "unit":"g" and a non-negative numeric amount.
+Every item has "unit":"g". Items must have either `amount` (with source user/vision/portion-resolver) OR `portion_label` (when grams unknown).
 
 Remove duplicates; merge notes if needed.
 
@@ -112,41 +135,42 @@ Return the full final list (not a diff).
 
 Short, generic examples
 
-Fast-food combo; user: regular, none, salted
+Fast-food combo; answers: {"fries_size": "large", "drink_variant": "diet"}
 
 {
   "updated_ingredients": [
-    {"name":"cheeseburger","amount":115,"unit":"g","source":"vision","notes":null},
-    {"name":"potato fries","amount":110,"unit":"g","source":"vision","notes":"salted"},
-    {"name":"cola","amount":400,"unit":"g","source":"user","notes":"regular; medium cup assumed"}
+    {"name":"cheeseburger","amount":null,"unit":"g","source":"estimation","portion_label":"single","notes":"McDonald's"},
+    {"name":"potato fries","amount":null,"unit":"g","source":"estimation","portion_label":"large","notes":"McDonald's"},
+    {"name":"cola (diet)","amount":null,"unit":"g","source":"estimation","portion_label":"medium","notes":"McDonald's"}
   ],
   "updated_assumptions":[
-    {"key":"drink_variant","value":"regular cola","confidence":1.0},
-    {"key":"condiments","value":"none","confidence":1.0}
+    {"key":"fries_size","value":"large","confidence":1.0},
+    {"key":"drink_variant","value":"diet cola","confidence":1.0}
   ]
 }
 
 
-Chicken biryani; user: chicken, bone-in, with ghee, ~1.5 cups
+Chicken biryani; answers: {"protein_type": "chicken", "ghee_used": "yes"}, user also said "~1.5 cups"
 
 {
   "updated_ingredients": [
-    {"name":"chicken biryani","amount":360,"unit":"g","source":"user","notes":"bone-in; with ghee; ~1.5 cups"},
-    {"name":"raita","amount":60,"unit":"g","source":"estimation","notes":null}
+    {"name":"chicken biryani","amount":360,"unit":"g","source":"user","portion_label":null,"notes":"bone-in; with ghee; ~1.5 cups"},
+    {"name":"raita","amount":null,"unit":"g","source":"estimation","portion_label":"side portion","notes":null}
   ],
   "updated_assumptions":[
-    {"key":"biryani_protein","value":"chicken (bone-in)","confidence":0.9}
+    {"key":"biryani_protein","value":"chicken (bone-in)","confidence":0.9},
+    {"key":"ghee_used","value":"yes","confidence":1.0}
   ]
 }
 
 
-Protein shake; user: 2 scoops, almond milk, with peanut butter
+Protein shake; user provided exact weights: "60g protein powder, 300ml almond milk"
 
 {
   "updated_ingredients": [
-    {"name":"protein powder (whey)","amount":60,"unit":"g","source":"user","notes":"2 scoops @ ~30 g each (typical)"},
-    {"name":"almond milk (unsweetened)","amount":300,"unit":"g","source":"user","notes":"~10 fl oz"},
-    {"name":"peanut butter","amount":32,"unit":"g","source":"user","notes":"~2 tbsp"}
+    {"name":"protein powder (whey)","amount":60,"unit":"g","source":"user","portion_label":null,"notes":"2 scoops"},
+    {"name":"almond milk (unsweetened)","amount":300,"unit":"g","source":"user","portion_label":null,"notes":"~10 fl oz"},
+    {"name":"peanut butter","amount":32,"unit":"g","source":"user","portion_label":null,"notes":"~2 tbsp"}
   ],
   "updated_assumptions":[
     {"key":"shake_base","value":"almond milk (unsweetened)","confidence":1.0}

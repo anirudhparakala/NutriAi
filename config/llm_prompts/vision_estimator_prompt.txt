@@ -10,7 +10,7 @@ Output (JSON only, no prose, no comments)
   "dish": "string",
   "portion_guess_g": number,
   "ingredients": [
-    {"name": "string", "amount": number, "unit": "g", "source": "vision|search|estimation", "notes": "string or null"}
+    {"name": "string", "amount": number|null, "unit": "g", "source": "vision|search|estimation", "portion_label": "string or null", "notes": "string or null"}
   ],
   "critical_questions": [
     {"id": "string", "text": "string", "options": ["..."], "default": "string", "impact_score": number}
@@ -35,17 +35,46 @@ Dishes: chicken biryani, chicken curry (tomato-based), dal.
 Beverages: cola, lemon-lime soda, iced tea (unsweetened), milk (2%), coffee (black), water.
 Put style/brand/method in notes (e.g., Hyderabadi style, deep-fried, McDonald's medium cup). notes should be null when empty (not an empty string).
 
-Amounts & units
+Amounts & units (STRICT)
 
-CRITICAL: Use grams for ALL amount values; set "unit": "g" (lowercase). Never use "mL" or "ml" for unit—always convert liquids to grams.
+**Do not estimate grams.** The system (not you) will resolve grams from brand+size, USDA portions, or category heuristics.
 
-For liquids, convert volume to grams using density by class: water-based drinks ~1.00 g/mL, carbonated sugary ~1.03–1.06, dairy milk ~1.03, plant milks ~0.98–1.02, oils ~0.92, syrups/honey ~1.35–1.45, alcoholic 0.79–0.95. If a brand/package is known or weight/volume is printed, prefer that; otherwise use the class default above or perform a single search.
+Your job:
 
-If a brand/package is visible or strongly implied, one search to obtain grams; set source: "search" and note the brand/size. Otherwise estimate (vision or estimation).
+1. **Only set `amount` if grams are explicitly visible** in packaging/labels/menus in the image. Set `source`: `"vision"` in this case.
 
-Image handling
+2. **If grams are not visible, set `amount`: `null`** and provide a `portion_label` instead:
+   * For sized items: `"small"`, `"medium"`, `"large"`, `"grande"`, etc.
+   * For counted items: `"2 pieces"`, `"1 scoop"`, `"3 cups"`
+   * For relative: `"single serving"`, `"plate"`
+   * Set `source`: `"estimation"`
 
-If multiple photos show the same meal, use the clearest views to estimate portions and merge information (do not double-count). If photos show different items, list all visible components. If an item is unclear/blurry, prefer a broad placeholder (database-searchable) plus a high-impact question over guessing specifics.
+3. **Unit conversions (only when grams are explicitly known from image)**:
+   * Convert volume to grams using density: water ≈ 1.00 g/mL; cola/soda ≈ 1.04; oils ≈ 0.92; honey ≈ 1.40
+   * Always output `"unit": "g"`
+
+4. If brand/package/chain is visible or strongly implied, note it in `notes` field (e.g., "McDonald's", "Starbucks grande") but do NOT estimate grams—let the system resolve.
+
+**Self-check before returning:**
+* If any ingredient has `amount` filled without visible packaging/labels, replace with `null` and add `portion_label`.
+* Implausible grams (fries >250g, burgers >300g, beverages >1000g for single serve) → set `amount`: `null`, adjust `portion_label`.
+
+Image handling (multi-photo guidance)
+
+**Multiple photos of the same meal:**
+* Use the clearest views to identify components
+* Merge information across photos (e.g., one shows brand label, another shows portion size)
+* **Do not double-count** the same item appearing in multiple angles
+* If one photo shows packaging/labels with grams and another shows the plated food, use the packaged grams
+
+**Multiple photos of different items:**
+* List all visible components across all photos
+* Treat each distinct item separately
+
+**Unclear/blurry items:**
+* Prefer a broad, database-searchable placeholder (e.g., "soda", "curry sauce", "milk")
+* Add a high-impact clarification question to refine it
+* Do not guess specifics when visual information is insufficient
 
 Placeholders & questions (tight loop)
 You may use a temporary placeholder only if it is still database-searchable (e.g., soda, curry sauce, milk) and you add a high-impact question to replace/refine it (variant, sweetener/fat %, size, protein type, cooking fat, add-ins). Aim for 2–4 questions total, sorted by impact_score (0–1), phrased for one-word answers. Use descriptive id fields that bind to the target ingredient (e.g., id: "fries_size" or "drink_variant") to help downstream refinement.
@@ -73,12 +102,53 @@ portion_guess_g ≈ sum of ingredient grams (roughly).
 
 Output valid JSON only: escape double quotes in strings; numbers must be numeric (not strings); no trailing commas.
 
-Mini examples (abbrev; patterns only)
+**JSON examples with portion_label (complete structure):**
 
-Fast-food tray: cheeseburger, potato fries, soda (+ questions: soda variant; size).
+Fast-food combo (McDonald's visible in image):
 
-Chicken biryani: chicken biryani, raita (+ questions: bone-in? ghee? cups).
+{
+  "dish": "Fast-food combo meal",
+  "portion_guess_g": 800,
+  "ingredients": [
+    {"name": "cheeseburger", "amount": null, "unit": "g", "source": "estimation", "portion_label": "single", "notes": "McDonald's"},
+    {"name": "potato fries", "amount": null, "unit": "g", "source": "estimation", "portion_label": "medium", "notes": "McDonald's"},
+    {"name": "cola", "amount": null, "unit": "g", "source": "estimation", "portion_label": "medium", "notes": "McDonald's"}
+  ],
+  "critical_questions": [
+    {"id": "fries_size", "text": "Fries size?", "options": ["small", "medium", "large"], "default": "medium", "impact_score": 0.8},
+    {"id": "drink_variant", "text": "Drink type?", "options": ["regular", "diet", "zero"], "default": "regular", "impact_score": 0.7}
+  ]
+}
 
-Protein shake: whey protein powder, milk (placeholder) (+ questions: base liquid, scoops, add-ins).
+
+Chicken biryani (homemade, no packaging):
+
+{
+  "dish": "Chicken biryani with raita",
+  "portion_guess_g": 450,
+  "ingredients": [
+    {"name": "chicken biryani", "amount": null, "unit": "g", "source": "estimation", "portion_label": "medium plate", "notes": null},
+    {"name": "raita", "amount": null, "unit": "g", "source": "estimation", "portion_label": "side portion", "notes": null}
+  ],
+  "critical_questions": [
+    {"id": "biryani_protein", "text": "Chicken bone-in or boneless?", "options": ["bone-in", "boneless"], "default": "bone-in", "impact_score": 0.6},
+    {"id": "ghee_used", "text": "Cooked with ghee?", "options": ["yes", "no"], "default": "yes", "impact_score": 0.5}
+  ]
+}
+
+
+Protein shake (package label visible with 30g per scoop):
+
+{
+  "dish": "Protein shake",
+  "portion_guess_g": 400,
+  "ingredients": [
+    {"name": "protein powder (whey)", "amount": 60, "unit": "g", "source": "vision", "portion_label": null, "notes": "30g per scoop shown on label"},
+    {"name": "milk", "amount": null, "unit": "g", "source": "estimation", "portion_label": "1 cup", "notes": null}
+  ],
+  "critical_questions": [
+    {"id": "shake_base", "text": "Base liquid?", "options": ["whole milk", "2% milk", "almond milk", "water"], "default": "2% milk", "impact_score": 0.7}
+  ]
+}
 
 —END—

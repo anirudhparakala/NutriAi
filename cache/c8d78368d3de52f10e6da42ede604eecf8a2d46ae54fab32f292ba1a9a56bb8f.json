@@ -1,0 +1,76 @@
+{
+  "key": "vision:gemini-2.5-flash-lite:27adc5d:image_hash=fce481932ea5d07a91c7991c09fdadb4bf78f9b4cc8f927188384231f9d12679",
+  "value": {
+    "dish": "McDonald's combo",
+    "portion_guess_g": 600.0,
+    "ingredients": [
+      {
+        "name": "Big Mac",
+        "amount": 215.0,
+        "unit": "g",
+        "source": "vision",
+        "portion_label": null,
+        "notes": "McDonald's"
+      },
+      {
+        "name": "fries",
+        "amount": null,
+        "unit": "g",
+        "source": "estimation",
+        "portion_label": "medium",
+        "notes": "McDonald's"
+      }
+    ],
+    "critical_questions": [
+      {
+        "id": "fries_size",
+        "text": "Fries size?",
+        "options": [
+          "small",
+          "medium",
+          "large"
+        ],
+        "default": "medium",
+        "impact_score": 0.8,
+        "follow_up_prompt": null
+      }
+    ],
+    "raw_model": {
+      "dish": "McDonald's combo",
+      "portion_guess_g": 600,
+      "ingredients": [
+        {
+          "name": "Big Mac",
+          "amount": 215,
+          "unit": "g",
+          "source": "vision",
+          "portion_label": null,
+          "notes": "McDonald's"
+        },
+        {
+          "name": "fries",
+          "amount": null,
+          "unit": "g",
+          "source": "estimation",
+          "portion_label": "medium",
+          "notes": "McDonald's"
+        }
+      ],
+      "critical_questions": [
+        {
+          "id": "fries_size",
+          "text": "Fries size?",
+          "impact_score": 0.8,
+          "options": [
+            "small",
+            "medium",
+            "large"
+          ],
+          "default": "medium"
+        }
+      ]
+    }
+  },
+  "ttl": 259200,
+  "created_at": 1759955018.9885905
+}

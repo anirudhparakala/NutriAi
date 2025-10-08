@@ -1,9 +1,14 @@
 import google.generativeai as genai
-from PIL import Image
-import io
+from typing import List
 from .schemas import VisionEstimate
 from .json_repair import parse_or_repair_json, llm_retry_with_system_hardener
 from .tool_runner import run_with_tools
+from .image_io import get_image_part
+from .vision_cache import get_cached_vision_output, cache_vision_output
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config.model_config import MODEL_NAME, GENERATION_CONFIG, PROMPT_VERSION
 
 
 def load_vision_prompt() -> str:
@@ -46,6 +51,51 @@ Required JSON Output Format:
 """
 
 
+def filter_critical_questions(questions: List, portion_guess_g: float, max_questions: int = 2):
+    """
+    Filter critical questions to highest-impact ones that meet calorie threshold.
+
+    UX Guardrail: Max 2 questions per meal, only if impact ≥10-15% or ≥120 kcal.
+
+    Args:
+        questions: List of question dicts
+        portion_guess_g: Estimated total meal weight in grams
+        max_questions: Maximum number of questions to show (default 2)
+
+    Returns:
+        Filtered list of questions (max 2, sorted by impact)
+    """
+    if not questions:
+        return []
+
+    # Estimate typical calorie impact based on portion size
+    # Rough estimate: ~2 kcal/g average for mixed meals
+    estimated_total_kcal = portion_guess_g * 2
+
+    # Filter questions by impact threshold
+    # Only ask if impact ≥ 10-15% of meal OR ≥ 120 kcal
+    min_impact_pct = 0.10  # 10% of meal
+    min_impact_kcal = 120
+
+    filtered = []
+    for q in questions:
+        impact_score = q.get("impact_score", 0.5)  # 0-1 scale
+        estimated_impact_kcal = estimated_total_kcal * impact_score
+
+        if estimated_impact_kcal >= min_impact_kcal or impact_score >= min_impact_pct:
+            filtered.append(q)
+
+    # Sort by impact score descending and take top N
+    filtered.sort(key=lambda q: q.get("impact_score", 0), reverse=True)
+
+    limited = filtered[:max_questions]
+
+    if len(questions) > len(limited):
+        print(f"DEBUG: Filtered questions from {len(questions)} to {len(limited)} (max={max_questions}, impact threshold: {min_impact_kcal}kcal or {min_impact_pct*100}%)")
+
+    return limited
+
+
 def estimate(image_bytes: bytes, model: genai.GenerativeModel, available_tools: dict = None) -> tuple[VisionEstimate | None, int]:
     """
     Analyzes an image and returns a structured nutritional estimate.
@@ -59,14 +109,25 @@ def estimate(image_bytes: bytes, model: genai.GenerativeModel, available_tools: 
         Tuple of (VisionEstimate object or None if parsing failed, tool_calls_count)
     """
     try:
+        # Check cache first for idempotency
+        cached_output = get_cached_vision_output(image_bytes, PROMPT_VERSION)
+        if cached_output:
+            # Reconstruct VisionEstimate from cached dict
+            try:
+                parsed_estimate = VisionEstimate(**cached_output)
+                return parsed_estimate, 0  # 0 tool calls since cached
+            except Exception as e:
+                print(f"WARNING: Failed to parse cached vision output: {e}, will re-compute")
+
         # Load prompt template
         prompt = load_vision_prompt()
 
-        # Convert bytes to PIL Image
-        image = Image.open(io.BytesIO(image_bytes))
+        # Convert image bytes to PIL Image with MIME validation
+        # Raises ValueError if unsupported format (e.g., BMP, GIF)
+        image = get_image_part(image_bytes)
 
         # Create chat session and send message with tool support
-        # Always route through run_with_tools for consistent error handling
+        # Gemini SDK accepts PIL Images directly - no upload needed
         chat = model.start_chat()
         response_text, tool_calls_count = run_with_tools(chat, available_tools or {}, [prompt, image])
 
@@ -104,6 +165,20 @@ Please retry the request and provide ONLY the JSON response.
                 parsed_estimate.raw_model = json.loads(response_text)
             except:
                 parsed_estimate.raw_model = {"raw_text": response_text}
+
+            # Apply UX guardrail: filter questions to max 2, high-impact only
+            if parsed_estimate.critical_questions:
+                original_count = len(parsed_estimate.critical_questions)
+                parsed_estimate.critical_questions = filter_critical_questions(
+                    [q.model_dump() if hasattr(q, 'model_dump') else q for q in parsed_estimate.critical_questions],
+                    parsed_estimate.portion_guess_g,
+                    max_questions=2
+                )
+                if original_count != len(parsed_estimate.critical_questions):
+                    print(f"INFO: Question budget applied - reduced from {original_count} to {len(parsed_estimate.critical_questions)} questions")
+
+            # Cache successful parse for idempotency
+            cache_vision_output(image_bytes, PROMPT_VERSION, parsed_estimate.model_dump())
 
         return parsed_estimate, tool_calls_count
 

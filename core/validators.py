@@ -1,5 +1,23 @@
 from typing import Dict, List, Any, Union
+import json
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config.privacy import sanitize_metrics
 from .nutrition_lookup import ScaledItem
+from .schemas import Ingredient
+
+# Beverage density approximations (g/ml) for per-100ml normalization
+BEVERAGE_DENSITY = {
+    "water": 1.0,
+    "soda": 1.04,  # Slightly denser due to sugar
+    "cola": 1.04,
+    "juice": 1.05,
+    "milk": 1.03,
+    "beer": 1.01,
+    "wine": 0.99,
+    "default": 1.0  # Fallback assumption: 1ml ≈ 1g
+}
 
 # Default portion bound heuristics (editable)
 PORTION_BOUNDS = {
@@ -194,6 +212,15 @@ def compute_confidence(scaled_items: List[ScaledItem], validations: Dict[str, An
         if high_severity_warnings:
             confidence -= len(high_severity_warnings) * 0.05
 
+        # Check combo sanity warnings (P2-E1) - capped at 0.3 max penalty
+        combo_sanity_warnings = validations.get("combo_sanity_warnings", [])
+        raw_combo_penalty = len(combo_sanity_warnings) * 0.1
+        combo_penalty = min(0.3, raw_combo_penalty)  # Cap at 0.3
+        confidence -= combo_penalty
+
+        if combo_sanity_warnings:
+            print(f"DEBUG: Combo sanity penalty: {raw_combo_penalty:.2f} (capped at {combo_penalty:.2f})")
+
         # Clamp to valid range
         confidence = max(0.1, min(0.95, confidence))
 
@@ -204,12 +231,13 @@ def compute_confidence(scaled_items: List[ScaledItem], validations: Dict[str, An
         return 0.1  # Lowest confidence on error
 
 
-def run_all_validations(scaled_items: List[ScaledItem]) -> Dict[str, Any]:
+def run_all_validations(scaled_items: List[ScaledItem], dish: str = "") -> Dict[str, Any]:
     """
     Run all validation checks and compute confidence score.
 
     Args:
         scaled_items: List of ScaledItem objects
+        dish: Dish name for context (optional)
 
     Returns:
         Complete validation results with confidence score
@@ -218,14 +246,16 @@ def run_all_validations(scaled_items: List[ScaledItem]) -> Dict[str, Any]:
         # Run individual validations
         four_four_nine = validate_4_4_9(scaled_items)
         portion_warnings = validate_portion_bounds(scaled_items)
+        combo_sanity_warnings = validate_combo_sanity_caps(scaled_items, dish)
 
         # Package validation results
         validations = {
             "four_four_nine": four_four_nine,
-            "portion_warnings": portion_warnings
+            "portion_warnings": portion_warnings,
+            "combo_sanity_warnings": combo_sanity_warnings
         }
 
-        # Compute confidence
+        # Compute confidence (include combo sanity in penalty calculation)
         confidence = compute_confidence(scaled_items, validations)
 
         return {
@@ -237,6 +267,7 @@ def run_all_validations(scaled_items: List[ScaledItem]) -> Dict[str, Any]:
                 "fallback_items": sum(1 for item in scaled_items if item["source"] == "fallback"),
                 "macro_validation_passed": four_four_nine.get("ok", False),
                 "portion_warnings_count": len(portion_warnings),
+                "combo_sanity_warnings_count": len(combo_sanity_warnings),
                 "confidence_score": confidence
             }
         }
@@ -246,6 +277,7 @@ def run_all_validations(scaled_items: List[ScaledItem]) -> Dict[str, Any]:
         return {
             "four_four_nine": {"ok": False, "error": str(e)},
             "portion_warnings": [],
+            "combo_sanity_warnings": [],
             "confidence": 0.1,
             "summary": {
                 "total_items": 0,
@@ -253,9 +285,225 @@ def run_all_validations(scaled_items: List[ScaledItem]) -> Dict[str, Any]:
                 "fallback_items": 0,
                 "macro_validation_passed": False,
                 "portion_warnings_count": 0,
+                "combo_sanity_warnings_count": 0,
                 "confidence_score": 0.1
             }
         }
+
+
+def validate_amount_source_contract(ingredients: List[Ingredient]) -> List[Dict[str, Any]]:
+    """
+    Validate that amount/source contract is satisfied for all ingredients.
+
+    Contract rules:
+    - If amount is set (not None), source MUST be 'user', 'vision', or 'portion-resolver'
+    - If amount is None, portion_label should be present
+
+    Args:
+        ingredients: List of Ingredient objects
+
+    Returns:
+        List of validation errors (empty if all pass)
+    """
+    errors = []
+
+    for i, ingredient in enumerate(ingredients):
+        # Check if amount is set without proper source
+        if ingredient.amount is not None and ingredient.amount > 0:
+            if ingredient.source not in ("user", "vision", "portion-resolver"):
+                errors.append({
+                    "ingredient_index": i,
+                    "ingredient_name": ingredient.name,
+                    "error_type": "invalid_amount_source",
+                    "message": f"Ingredient '{ingredient.name}' has amount={ingredient.amount}g but source='{ingredient.source}'. "
+                               f"Amount can only be set with source='user'/'vision'/'portion-resolver'.",
+                    "severity": "high"
+                })
+
+        # Check if both amount and portion_label are None (incomplete data)
+        if ingredient.amount is None and not ingredient.portion_label:
+            errors.append({
+                "ingredient_index": i,
+                "ingredient_name": ingredient.name,
+                "error_type": "incomplete_portion_data",
+                "message": f"Ingredient '{ingredient.name}' has neither amount nor portion_label. One must be set.",
+                "severity": "high"
+            })
+
+    return errors
+
+
+def validate_incomplete_portions(ingredients: List[Ingredient]) -> Dict[str, Any]:
+    """
+    Check for ingredients that still have unresolved portion labels.
+
+    Args:
+        ingredients: List of Ingredient objects
+
+    Returns:
+        Dict with validation results
+    """
+    incomplete_items = []
+
+    for ingredient in ingredients:
+        # Flag items that have portion_label but no amount (need portion resolution)
+        if ingredient.amount is None and ingredient.portion_label:
+            incomplete_items.append({
+                "name": ingredient.name,
+                "portion_label": ingredient.portion_label,
+                "source": ingredient.source,
+                "notes": ingredient.notes
+            })
+
+    return {
+        "has_incomplete_portions": len(incomplete_items) > 0,
+        "incomplete_count": len(incomplete_items),
+        "incomplete_items": incomplete_items,
+        "message": f"{len(incomplete_items)} ingredient(s) need portion resolution" if incomplete_items else "All portions resolved"
+    }
+
+
+def validate_combo_sanity_caps(scaled_items: List[ScaledItem], dish: str) -> List[Dict[str, Any]]:
+    """
+    Runtime guard: Detect implausible macro combinations.
+
+    Examples:
+    - 2000+ kcal from diet soda (diet = <10 kcal/100ml)
+    - >50g protein from salad greens
+    - >80g fat from grilled chicken breast
+
+    Args:
+        scaled_items: List of ScaledItem objects
+        dish: Dish name for context
+
+    Returns:
+        List of warning dictionaries for implausible combos
+    """
+    warnings = []
+
+    try:
+        for item in scaled_items:
+            item_name = item["name"].lower().strip()
+            kcal = item["kcal"]
+            protein_g = item["protein_g"]
+            fat_g = item["fat_g"]
+            carb_g = item["carb_g"]
+            grams = item["grams"]
+
+            # Diet/zero beverages should have <10 kcal per 100ml
+            diet_keywords = ["diet", "zero", "light", "sugar-free"]
+            if any(kw in item_name for kw in diet_keywords):
+                if "soda" in item_name or "cola" in item_name or "beverage" in item_name or "drink" in item_name:
+                    # Get density for beverage type (g/ml) - fallback to 1.00 if unknown
+                    density = None
+                    density_source = "unknown"
+                    for bev_type, bev_density in BEVERAGE_DENSITY.items():
+                        if bev_type in item_name:
+                            density = bev_density
+                            density_source = bev_type
+                            break
+
+                    if density is None:
+                        density = BEVERAGE_DENSITY["default"]
+                        density_source = "default"
+                        print(f"DEBUG: Using default density (1.00 g/mL) for '{item_name}' - brand/type unknown")
+
+                    ml_equivalent = grams / density  # Convert grams to ml
+                    expected_max_kcal = (ml_equivalent / 100) * 10  # 10 kcal per 100ml
+
+                    if kcal > expected_max_kcal * 2:  # Allow 2x tolerance
+                        warnings.append({
+                            "item_name": item["name"],
+                            "kcal": kcal,
+                            "expected_max": expected_max_kcal,
+                            "category": "diet_beverage_kcal",
+                            "severity": "high",
+                            "unit": "per_100ml",
+                            "density_used": density,
+                            "density_source": density_source,  # "cola", "soda", or "default"
+                            "message": f"'{item['name']}' is marked diet/zero but has {kcal}kcal (expected <{expected_max_kcal:.0f}kcal for {ml_equivalent:.0f}ml)"
+                        })
+
+            # Leafy greens/salad shouldn't have >10g protein per 100g
+            leafy_keywords = ["lettuce", "spinach", "arugula", "kale", "salad", "greens"]
+            if any(kw in item_name for kw in leafy_keywords):
+                protein_per_100g = (protein_g / grams) * 100 if grams > 0 else 0
+                if protein_per_100g > 10:
+                    warnings.append({
+                        "item_name": item["name"],
+                        "protein_g": protein_g,
+                        "protein_per_100g": protein_per_100g,
+                        "category": "leafy_protein",
+                        "severity": "high",
+                        "message": f"'{item['name']}' (leafy green) has {protein_per_100g:.1f}g protein per 100g (expected <10g)"
+                    })
+
+            # Lean proteins (chicken breast, turkey, white fish) shouldn't exceed 15% fat by weight
+            lean_keywords = ["chicken breast", "turkey breast", "cod", "tilapia", "haddock", "white fish", "tuna"]
+            if any(kw in item_name for kw in lean_keywords):
+                fat_pct = (fat_g / grams) * 100 if grams > 0 else 0
+                if fat_pct > 15:
+                    warnings.append({
+                        "item_name": item["name"],
+                        "fat_g": fat_g,
+                        "fat_pct": fat_pct,
+                        "category": "lean_protein_fat",
+                        "severity": "high",
+                        "message": f"'{item['name']}' (lean protein) has {fat_pct:.1f}% fat by weight (expected <15%)"
+                    })
+
+            # Skim/fat-free milk should have <1% fat by weight
+            skim_keywords = ["skim", "fat-free", "nonfat", "0%"]
+            if any(kw in item_name for kw in skim_keywords) and "milk" in item_name:
+                fat_pct = (fat_g / grams) * 100 if grams > 0 else 0
+                if fat_pct > 1:
+                    warnings.append({
+                        "item_name": item["name"],
+                        "fat_g": fat_g,
+                        "fat_pct": fat_pct,
+                        "category": "skim_milk_fat",
+                        "severity": "high",
+                        "message": f"'{item['name']}' (skim/fat-free) has {fat_pct:.1f}% fat (expected <1%)"
+                    })
+
+            # Water should have 0 kcal
+            if item_name == "water" or item_name == "plain water":
+                if kcal > 0:
+                    warnings.append({
+                        "item_name": item["name"],
+                        "kcal": kcal,
+                        "expected": 0,
+                        "category": "water_kcal",
+                        "severity": "high",
+                        "message": f"Water should have 0 kcal, got {kcal}kcal"
+                    })
+
+        if warnings:
+            # Log each warning with unit information (privacy-aware)
+            for warning in warnings:
+                metric = {
+                    "event": "combo_sanity_fail",
+                    "dish": dish,
+                    "item": warning["item_name"],
+                    "category": warning["category"],
+                    "severity": warning["severity"]
+                }
+                if "unit" in warning:
+                    metric["unit"] = warning["unit"]
+                if "density_used" in warning:
+                    metric["density"] = warning["density_used"]
+                print(f"METRICS: {json.dumps(sanitize_metrics(metric))}")
+
+    except Exception as e:
+        print(f"Error in combo sanity validation: {e}")
+        warnings.append({
+            "item_name": "validation_error",
+            "category": "error",
+            "severity": "high",
+            "message": f"Combo sanity check failed: {e}"
+        })
+
+    return warnings
 
 
 def format_validation_summary(validations: Dict[str, Any]) -> str:

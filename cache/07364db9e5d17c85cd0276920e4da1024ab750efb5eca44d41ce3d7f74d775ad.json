@@ -1,0 +1,35 @@
+{
+  "key": "vision:gemini-2.5-flash-lite:27adc5d:image_hash=b1ff9c8ea3a780bad09b346c423d2d0e46815926879b18e841d928376a946640",
+  "value": {
+    "dish": "Test Meal",
+    "portion_guess_g": 500.0,
+    "ingredients": [
+      {
+        "name": "chicken",
+        "amount": 150.0,
+        "unit": "g",
+        "source": "vision",
+        "portion_label": null,
+        "notes": null
+      }
+    ],
+    "critical_questions": [],
+    "raw_model": {
+      "dish": "Test Meal",
+      "portion_guess_g": 500,
+      "ingredients": [
+        {
+          "name": "chicken",
+          "amount": 150,
+          "unit": "g",
+          "source": "vision",
+          "portion_label": null,
+          "notes": null
+        }
+      ],
+      "critical_questions": []
+    }
+  },
+  "ttl": 259200,
+  "created_at": 1759954907.915372
+}

@@ -1,4 +1,8 @@
 from typing import TypedDict, Literal, Dict, List, Optional, Any
+try:
+    from typing import NotRequired
+except ImportError:
+    from typing_extensions import NotRequired
 from integrations import usda_client, normalize
 import re
 
@@ -94,6 +98,7 @@ class GroundedItem(TypedDict):
     fdc_id: Optional[int]
     source: Literal["USDA", "fallback"]
     per100g: Dict[str, float]  # {"kcal": float, "protein_g": float, "carb_g": float, "fat_g": float}
+    _top3_candidates: NotRequired[List[Dict[str, Any]]]  # P2-E2 explainability breadcrumb
 
 
 class ScaledItem(TypedDict):
@@ -146,6 +151,19 @@ def normalize_and_ground(name: str, search_fn=None) -> tuple[GroundedItem, int]:
         usda_match = usda_client.search_best_match(normalized_name)
 
         if usda_match:
+            # Check if USDA returned an ambiguous result (needs user clarification)
+            if usda_match.get("_ambiguous"):
+                print(f"DEBUG: USDA returned ambiguous result - needs clarification")
+                # Return special grounded item that indicates ambiguity
+                return GroundedItem(
+                    name=name,
+                    normalized_name=normalized_name,
+                    fdc_id=None,
+                    source="ambiguous",
+                    per100g={"kcal": 0, "protein_g": 0, "carb_g": 0, "fat_g": 0},
+                    _ambiguous_candidates=usda_match.get("_candidates", [])
+                ), tool_calls_count
+
             print(f"DEBUG: USDA match found - FDC ID: {usda_match.get('fdcId')}, Description: {usda_match.get('description', 'N/A')}")
 
             # Extract macros from USDA data
@@ -154,6 +172,8 @@ def normalize_and_ground(name: str, search_fn=None) -> tuple[GroundedItem, int]:
 
             # Comprehensive nutrition sanity check
             if not _passes_critical_nutrition(name.lower(), macros):
+                import json
+                print(f"METRICS: {json.dumps({'event': 'sanity_gate_fail', 'ingredient': name, 'matched': usda_match.get('description'), 'macros': macros})}")
                 print(f"WARNING: Nutrition sanity check failed for '{name}'")
                 print(f"WARNING: Matched: {usda_match.get('description', 'N/A')}")
                 print(f"WARNING: Macros: {macros}")
@@ -177,14 +197,20 @@ def normalize_and_ground(name: str, search_fn=None) -> tuple[GroundedItem, int]:
 
             fdc_id = usda_match.get('fdcId')
 
+            # Extract top-3 candidates for explainability (P2-E2)
+            top3_candidates = usda_match.get('_top3', [])
+
             grounded_item = GroundedItem(
                 name=name,
                 normalized_name=normalized_name,
                 fdc_id=fdc_id,
                 source="USDA",
-                per100g=macros
+                per100g=macros,
+                _top3_candidates=top3_candidates
             )
             print(f"DEBUG: Created GroundedItem: {grounded_item}")
+            if top3_candidates:
+                print(f"DEBUG: Top-3 USDA candidates for explainability: {[c.get('description') for c in top3_candidates]}")
             return grounded_item, tool_calls_count
         else:
             # Fallback to zeros if no USDA match found
@@ -428,11 +454,24 @@ def build_deterministic_breakdown(ingredients: List[Dict], search_fn=None) -> tu
                     "fdc_id": item["fdc_id"]
                 })
 
+        # Step 5: Extract explainability data (top-3 USDA candidates per ingredient)
+        print(f"DEBUG: Step 5 - Extracting explainability data")
+        explainability = []
+        for grounded in grounded_items:
+            top3 = grounded.get("_top3_candidates", [])
+            if top3:
+                explainability.append({
+                    "ingredient_name": grounded["name"],
+                    "candidates": top3,
+                    "selected_fdc_id": grounded.get("fdc_id")
+                })
+
         return {
             "items": scaled_items,
             "totals": totals,
             "attribution": attribution,
-            "grounding_policy": GROUNDING_POLICY
+            "grounding_policy": GROUNDING_POLICY,
+            "explainability": explainability  # P2-E2
         }, tool_calls_count
 
     except Exception as e:

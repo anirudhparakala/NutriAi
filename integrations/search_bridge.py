@@ -1,12 +1,14 @@
 from tavily import TavilyClient
+from typing import Callable, Optional
 
 
-def create_search_tool_function(tavily_client: TavilyClient):
+def create_search_tool_function(tavily_client: TavilyClient, metric_logger: Optional[Callable[[str, int], None]] = None):
     """
-    Creates a search function with the tavily client injected.
+    Creates a search function with the tavily client injected and optional metric logging.
 
     Args:
         tavily_client: Configured TavilyClient instance
+        metric_logger: Optional callback function to log search metrics (query, result_count)
 
     Returns:
         Function that performs web search using the provided client
@@ -21,8 +23,12 @@ def create_search_tool_function(tavily_client: TavilyClient):
             results = tavily_client.search(query=query, search_depth="basic")
             rows = [{"url": obj["url"], "content": obj["content"]} for obj in results.get("results", [])]
 
-            # OPTIONAL: Log search telemetry here if you have session_id in scope
-            # db.log_search_query(st.session_state.get("active_session_id"), query, len(rows))
+            # Call metric logger hook if provided
+            if metric_logger:
+                try:
+                    metric_logger(query, len(rows))
+                except Exception as log_error:
+                    print(f"Metric logging failed (non-fatal): {log_error}")
 
             return rows
         except Exception as e:

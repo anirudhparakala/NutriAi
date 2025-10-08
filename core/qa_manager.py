@@ -44,20 +44,30 @@ Required JSON Output Format:
 """
 
 
-def refine(context: str, user_input: str, chat_session: genai.ChatSession, available_tools: dict = None) -> tuple[RefinementUpdate | None, int]:
+def refine(context: str, user_input: str | dict, chat_session: genai.ChatSession, available_tools: dict = None) -> tuple[RefinementUpdate | None, int]:
     """
     Processes user input to refine the nutritional estimate.
 
     Args:
         context: Context from the previous conversation
-        user_input: User's clarification or correction
+        user_input: Either a dict[question_id, answer] for structured answers,
+                   or a string for free-form clarifications (backward compat)
         chat_session: Active chat session with conversation history
         available_tools: Dict mapping tool names to functions for search, etc.
 
     Returns:
         Tuple of (RefinementUpdate object or None if parsing failed, tool_calls_count)
     """
-    print(f"DEBUG: refine() called with user_input: '{user_input}'")
+    if isinstance(user_input, dict):
+        print(f"DEBUG: refine() called with structured answers: {user_input}")
+        answers_json = json.dumps(user_input, indent=2)
+        input_text = f"User provided these answers to critical questions:\n{answers_json}"
+    else:
+        # Free-form text is only allowed when there are no critical questions
+        # Otherwise, reject to enforce dict[id, answer] format
+        print(f"WARNING: Received free-form user_input (deprecated path): '{user_input}'")
+        print(f"WARNING: Prefer dict[id, answer] format for reliability")
+        input_text = f"User input: {user_input}"
 
     try:
         # Load prompt template
@@ -68,7 +78,7 @@ def refine(context: str, user_input: str, chat_session: genai.ChatSession, avail
 {base_prompt}
 
 Context from conversation: {context}
-User input: {user_input}
+{input_text}
 
 Based on this information, provide the JSON response with any updates to ingredients or assumptions.
 """
@@ -122,8 +132,17 @@ Please retry the request and provide ONLY the JSON response.
 
             print(f"DEBUG: Successfully parsed refinement")
             print(f"DEBUG: Updated ingredients: {len(parsed_update.updated_ingredients)}")
+
+            # Enforce amount/source contract before returning
             for ing in parsed_update.updated_ingredients:
-                print(f"DEBUG:   - {ing.name}: {ing.amount}g")
+                # Validation is already done by Pydantic validator in schemas.py
+                # Just log for debugging
+                if ing.amount is not None:
+                    print(f"DEBUG:   - {ing.name}: {ing.amount}g (source: {ing.source})")
+                else:
+                    portion_info = f" [{ing.portion_label}]" if ing.portion_label else ""
+                    print(f"DEBUG:   - {ing.name}: portion_label{portion_info} (source: {ing.source})")
+
             print(f"DEBUG: Updated assumptions: {len(parsed_update.updated_assumptions)}")
         else:
             print(f"ERROR: parsed_update is None, refinement failed")
@@ -226,12 +245,34 @@ def generate_final_calculation(chat_session: genai.ChatSession, available_tools:
                                 ingredients.append({"name": name, "amount": amount})
                                 print(f"DEBUG:   - Added new: {name}: {amount}g")
 
-        # Step 2: Resolve portions deterministically (prevents LLM from inventing grams)
-        print(f"DEBUG: Resolving portions for {len(ingredients)} ingredients")
-        ingredients = resolve_portions(ingredients)
-        print(f"DEBUG: Portions resolved")
+        # Step 2: Canonicalize names (normalize aliases, portion labels)
+        from .normalize import canonicalize_name, canonicalize_portion_label
+        print(f"DEBUG: Canonicalizing {len(ingredients)} ingredient names")
+        for ingredient in ingredients:
+            original_name = ingredient.get("name", "")
+            original_portion = ingredient.get("portion_label", "")
 
-        # Step 3: Use deterministic pipeline to compute macros
+            # Canonicalize name (context-aware)
+            brand = ingredient.get("notes", "") or ""
+            canonical_name = canonicalize_name(original_name, brand=brand)
+
+            # Canonicalize portion label
+            canonical_portion = canonicalize_portion_label(original_portion)
+
+            if canonical_name != original_name:
+                print(f"DEBUG: Canonicalized name: '{original_name}' → '{canonical_name}'")
+                ingredient["name"] = canonical_name
+
+            if canonical_portion and canonical_portion != original_portion:
+                print(f"DEBUG: Canonicalized portion: '{original_portion}' → '{canonical_portion}'")
+                ingredient["portion_label"] = canonical_portion
+
+        # Step 3: Resolve portions deterministically (prevents LLM from inventing grams)
+        print(f"DEBUG: Resolving portions for {len(ingredients)} ingredients")
+        ingredients, portion_metrics = resolve_portions(ingredients)
+        print(f"DEBUG: Portions resolved with metrics: {portion_metrics}")
+
+        # Step 4: Use deterministic pipeline to compute macros
         search_fn = available_tools.get('perform_web_search') if available_tools else None
         deterministic_result, nutrition_tool_calls = build_deterministic_breakdown(ingredients, search_fn)
 

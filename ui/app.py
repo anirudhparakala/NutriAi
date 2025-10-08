@@ -17,6 +17,7 @@ from core.schemas import VisionEstimate
 from core.json_repair import parse_or_repair_json, validate_macro_sanity
 from integrations.search_bridge import create_search_tool_function
 from integrations import db, usda_client
+from config.model_config import MODEL_NAME, GENERATION_CONFIG, get_session_metadata
 from pydantic import BaseModel
 from typing import Optional
 
@@ -78,9 +79,13 @@ available_tools = {
 }
 
 model = genai.GenerativeModel(
-    model_name="gemini-2.5-flash-lite",
-    tools=[my_search_tool]
+    model_name=MODEL_NAME,
+    tools=[my_search_tool],
+    generation_config=GENERATION_CONFIG
 )
+
+# Log model configuration at startup
+print(f"INFO: Model initialized with config: {get_session_metadata()}")
 
 
 def load_css():
@@ -168,11 +173,32 @@ def main():
         st.image(st.session_state.uploaded_image_data, caption="Your meal.", use_container_width=True)
         if st.button("🔍 Analyze Food"):
             with st.spinner("Performing expert analysis..."):
-                # Use the new vision estimator with tool support
-                estimate, vision_tool_calls = vision_estimator.estimate(st.session_state.uploaded_image_data, model, available_tools)
+                try:
+                    # Use the new vision estimator with tool support
+                    estimate, vision_tool_calls = vision_estimator.estimate(st.session_state.uploaded_image_data, model, available_tools)
 
-                if estimate is None:
-                    st.error("Failed to analyze the image. Please try again.", icon="❌")
+                    if estimate is None:
+                        st.error("Failed to analyze the image. Please try again.", icon="❌")
+                        return
+                except ValueError as e:
+                    # Handle empty response error from tool_runner
+                    error_msg = str(e)
+                    if "empty response" in error_msg.lower():
+                        st.error(
+                            "⚠️ The AI returned an empty response. This may indicate:\n\n"
+                            "- API quota exceeded\n"
+                            "- Model temporary failure\n"
+                            "- Network issues\n\n"
+                            "**Please try again in a moment.**",
+                            icon="🔄"
+                        )
+                        if st.button("🔄 Try Again"):
+                            st.rerun()
+                        return
+                    else:
+                        raise
+                except Exception as e:
+                    st.error(f"Unexpected error during analysis: {e}", icon="❌")
                     return
 
                 # Track tool calls
@@ -205,43 +231,112 @@ def main():
                     with st.chat_message("assistant"):
                         st.markdown(message.parts[0].text)
 
-        # Display critical questions with answer input
+        # Display assumption chips for silent defaults (UX guardrail)
         if st.session_state.vision_estimate and st.session_state.vision_estimate.critical_questions:
-            with st.expander("📋 Questions to improve accuracy", expanded=True):
+            # Collect all defaults that user hasn't explicitly changed
+            defaults_display = []
+            for question in st.session_state.vision_estimate.critical_questions:
+                if question.default:
+                    # Extract ingredient name from question ID (e.g., "fries_size" -> "Fries")
+                    ingredient_hint = question.id.split('_')[0].capitalize()
+                    defaults_display.append(f"{ingredient_hint} · **{question.default}**")
+
+            if defaults_display:
+                st.markdown("**🔹 Current assumptions:**")
+                st.caption(" • ".join(defaults_display) + " _(Change below if needed)_")
+                st.markdown("---")
+
+        # Display critical questions with structured answer collection
+        question_answers = {}
+        if st.session_state.vision_estimate and st.session_state.vision_estimate.critical_questions:
+            with st.expander("✎ Change assumptions (optional)", expanded=False):
                 for i, question in enumerate(st.session_state.vision_estimate.critical_questions, 1):
                     st.markdown(f"**{i}. {question.text}**")
+
+                    # Collect structured answers using question ID
                     if question.options:
-                        st.caption(f"Options: {', '.join(question.options)}")
+                        # Use selectbox for options-based questions
+                        default_index = 0
+                        if question.default and question.default in question.options:
+                            default_index = question.options.index(question.default)
+
+                        answer = st.selectbox(
+                            f"Select answer for: {question.text}",
+                            options=question.options,
+                            index=default_index,
+                            key=f"q_{question.id}",
+                            label_visibility="collapsed"
+                        )
+                        question_answers[question.id] = answer
+
+                        # Show follow-up prompt if available
+                        if question.follow_up_prompt and answer.lower() in ["specify", "other", "custom"]:
+                            follow_up = st.text_input(
+                                question.follow_up_prompt,
+                                key=f"followup_{question.id}",
+                                placeholder=question.follow_up_prompt
+                            )
+                            if follow_up and follow_up.strip():
+                                question_answers[question.id] = follow_up
+                    else:
+                        # Free-form text input for open questions
+                        answer = st.text_input(
+                            f"Answer: {question.text}",
+                            key=f"q_{question.id}",
+                            placeholder=question.default if question.default else "",
+                            label_visibility="collapsed"
+                        )
+                        if answer and answer.strip():
+                            question_answers[question.id] = answer
+                        elif question.default:
+                            question_answers[question.id] = question.default
+
+        # Store question answers in session state for use in Calculate button
+        st.session_state.question_answers = question_answers
 
         # Create or reuse chat session for conversation persistence
         if "conversation_chat" not in st.session_state:
             st.session_state.conversation_chat = model.start_chat()
         conversation_chat = st.session_state.conversation_chat
 
-        # Main answer input - can be used either by pressing Enter OR clicking Calculate button
-        st.markdown("### Answer Questions / Provide Details")
-
-        # Initialize pending_answer in session state if needed
-        if "pending_answer" not in st.session_state:
-            st.session_state.pending_answer = ""
-
-        answer_input = st.text_input(
-            "Type your answers here (e.g., 'diet cola, medium' or 'diet, medium')",
-            placeholder="Example: diet cola, medium fries",
-            key="answer_input_box",
-            help="You can answer critical questions above, or provide any clarifications. Formats like 'diet cola', 'diet, medium', or full sentences all work!"
-        )
+        # Only show additional clarifications if there are no structured questions
+        # This enforces dict[id, answer] format and prevents free-form parsing errors
+        clarification_input = ""
+        if not (st.session_state.vision_estimate and st.session_state.vision_estimate.critical_questions):
+            st.markdown("### Additional Details")
+            clarification_input = st.text_area(
+                "No specific questions generated. Add any details here:",
+                placeholder="Example: medium fries, diet cola, etc.",
+                key="clarification_input_box",
+                help="Provide specific details about sizes, variants, or ingredients",
+                height=80
+            )
 
         # Process button for immediate refinement (optional - user can also just click Calculate)
         col1, col2 = st.columns([1, 3])
         with col1:
-            if st.button("💬 Submit Answer") and answer_input:
+            # Submit button now uses structured answers + optional clarifications
+            has_answers = bool(question_answers and any(v for v in question_answers.values()))
+            has_clarifications = bool(clarification_input and clarification_input.strip())
+
+            if st.button("💬 Submit Answers", disabled=not (has_answers or has_clarifications)):
                 with st.spinner("Processing your input..."):
+                    # Prepare input for QA manager
+                    # If we have structured answers, use dict format
+                    # Otherwise fall back to free-form text
+                    if has_answers:
+                        user_input = question_answers.copy()
+                        # If there are clarifications, add them as a special key
+                        if has_clarifications:
+                            user_input["_additional_clarifications"] = clarification_input
+                    else:
+                        user_input = clarification_input
+
                     # Process the answer immediately
                     context = st.session_state.vision_estimate.model_dump() if st.session_state.vision_estimate else {}
                     refinement, qa_tool_calls = qa_manager.refine(
                         context=json.dumps(context),
-                        user_input=answer_input,
+                        user_input=user_input,
                         chat_session=conversation_chat,
                         available_tools=available_tools
                     )
@@ -256,8 +351,12 @@ def main():
                         if refinement.updated_ingredients:
                             response_text += "**Updated ingredients:**\n"
                             for ingredient in refinement.updated_ingredients:
+                                if ingredient.amount is not None:
+                                    amount_text = f"{ingredient.amount}g"
+                                else:
+                                    amount_text = f"portion: {ingredient.portion_label}" if ingredient.portion_label else "portion pending"
                                 notes_text = f" ({ingredient.notes})" if ingredient.notes else ""
-                                response_text += f"- {ingredient.name}: {ingredient.amount}g{notes_text}\n"
+                                response_text += f"- {ingredient.name}: {amount_text}{notes_text}\n"
 
                         st.success(response_text)
 
@@ -269,7 +368,7 @@ def main():
                         # Rerun to refresh (input will be cleared automatically)
                         st.rerun()
                     else:
-                        st.warning("I'm having trouble understanding that. Please try rephrasing (e.g., 'diet cola, medium')")
+                        st.warning("I'm having trouble understanding that. Please try providing more details.")
 
         st.divider()
 
@@ -278,15 +377,26 @@ def main():
         if refinement_count > 0:
             st.info(f"✅ {refinement_count} refinement(s) submitted", icon="✅")
 
-        # Calculate button - NOW auto-processes any pending answer
+        # Calculate button - auto-processes any pending answers
         if st.button("🎯 Calculate Final Estimate", type="primary"):
-            # FIRST: Check if there's any pending answer that hasn't been submitted
-            if answer_input and answer_input.strip():
-                with st.spinner("Processing your pending answer..."):
+            # FIRST: Check if there are any pending answers/clarifications that haven't been submitted
+            has_pending_answers = bool(question_answers and any(v for v in question_answers.values()))
+            has_pending_clarifications = bool(clarification_input and clarification_input.strip())
+
+            if has_pending_answers or has_pending_clarifications:
+                with st.spinner("Processing your pending answers..."):
+                    # Prepare input same way as Submit button
+                    if has_pending_answers:
+                        user_input = question_answers.copy()
+                        if has_pending_clarifications:
+                            user_input["_additional_clarifications"] = clarification_input
+                    else:
+                        user_input = clarification_input
+
                     context = st.session_state.vision_estimate.model_dump() if st.session_state.vision_estimate else {}
                     refinement, qa_tool_calls = qa_manager.refine(
                         context=json.dumps(context),
-                        user_input=answer_input,
+                        user_input=user_input,
                         chat_session=conversation_chat,
                         available_tools=available_tools
                     )
@@ -342,6 +452,8 @@ def main():
                 breakdown: list[dict]
                 attribution: Optional[list[AttributionItem]] = []
                 validations: Optional[Validations] = None
+                explanation: Optional[str] = None
+                follow_up_question: Optional[str] = None
 
             parsed_data, errors = parse_or_repair_json(raw_text, FinalBreakdownModel)
 
@@ -353,6 +465,8 @@ def main():
             breakdown_list = data.get("breakdown", [])
             attribution_list = data.get("attribution", [])
             validations = data.get("validations", {})
+            explanation = data.get("explanation", "")
+            follow_up_question = data.get("follow_up_question", "")
 
             # Log validation issues (don't display to user to maintain trust)
             four_four_nine = validations.get("four_four_nine", {})
@@ -420,6 +534,13 @@ def main():
 
             st.table(display_data)
 
+            # Show LLM explanation if available
+            if explanation and explanation.strip():
+                with st.expander("💡 AI Explanation", expanded=False):
+                    st.markdown(explanation)
+                    if follow_up_question and follow_up_question.strip():
+                        st.info(f"**Suggestion:** {follow_up_question}", icon="💭")
+
             # Show USDA attribution info
             if attribution_list:
                 with st.expander("📊 USDA Data Attribution"):
@@ -434,17 +555,22 @@ def main():
             col3.metric("Total Carbs", f"{round(total_carbs)}g")
             col4.metric("Total Fat", f"{round(total_fat)}g")
 
-            # Log successful session to database
+            # Log successful session to database with model metadata
             if st.session_state.vision_estimate and not st.session_state.get("session_logged", False):
                 try:
+                    # Add model metadata to session log
+                    metadata = get_session_metadata()
+                    print(f"INFO: Logging session with metadata: {metadata}")
+
                     session_id = db.log_session(
                         estimate=st.session_state.vision_estimate,
                         refinements=st.session_state.get("refinements", []),
                         final_json=raw_text,
-                        tool_calls_count=st.session_state.get("tool_calls_count", 0)
+                        tool_calls_count=st.session_state.get("tool_calls_count", 0),
+                        metadata=metadata  # Pass model name, prompt version, config
                     )
                     st.session_state.session_logged = True
-                    st.caption(f"📊 Session logged (ID: {session_id}) for future improvements")
+                    st.caption(f"📊 Session logged (ID: {session_id}, model: {metadata['model_name']}, version: {metadata['prompt_version']})")
                 except Exception as e:
                     print(f"Failed to log session: {e}")
 

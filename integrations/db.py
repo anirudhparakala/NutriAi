@@ -26,7 +26,10 @@ def init():
         refinements_json TEXT,
         final_json TEXT,
         confidence_score REAL DEFAULT 0.5,
-        tool_calls_count INTEGER DEFAULT 0
+        tool_calls_count INTEGER DEFAULT 0,
+        model_name TEXT,
+        prompt_version TEXT,
+        generation_config_json TEXT
     )""")
 
     # Create assumptions table for tracking common assumptions and their accuracy
@@ -50,11 +53,27 @@ def init():
         FOREIGN KEY (session_id) REFERENCES sessions (id)
     )""")
 
+    # Create usda_candidates table for explainability (P2-E2)
+    cur.execute("""CREATE TABLE IF NOT EXISTS usda_candidates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER,
+        ingredient_name TEXT NOT NULL,
+        candidate_rank INTEGER NOT NULL,
+        fdc_id INTEGER,
+        description TEXT,
+        score REAL,
+        data_type TEXT,
+        selected BOOLEAN DEFAULT 0,
+        created_at REAL NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions (id)
+    )""")
+
     # Create indices for query performance
     cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON sessions(created_at);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_dish ON sessions(dish);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_assumptions_session ON assumptions(session_id);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_searches_session ON search_queries(session_id);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_usda_candidates_session ON usda_candidates(session_id);")
 
     con.commit()
     con.close()
@@ -64,7 +83,7 @@ def init():
         init._already_logged = True
 
 
-def log_session(estimate, refinements=None, final_json=None, tool_calls_count=0) -> int:
+def log_session(estimate, refinements=None, final_json=None, tool_calls_count=0, metadata=None) -> int:
     """
     Log a complete analysis session.
 
@@ -73,6 +92,7 @@ def log_session(estimate, refinements=None, final_json=None, tool_calls_count=0)
         refinements: List of RefinementUpdate objects (optional)
         final_json: Final JSON breakdown string (optional)
         tool_calls_count: Number of tool calls made during session
+        metadata: Dict with model_name, prompt_version, generation_config (optional)
 
     Returns:
         Session ID of the logged session
@@ -100,11 +120,23 @@ def log_session(estimate, refinements=None, final_json=None, tool_calls_count=0)
             for refinement in refinements
         ])
 
+    # Extract metadata if provided
+    model_name = None
+    prompt_version = None
+    generation_config_json = None
+    if metadata:
+        model_name = metadata.get('model_name')
+        prompt_version = metadata.get('prompt_version')
+        generation_config = metadata.get('generation_config')
+        if generation_config:
+            generation_config_json = json.dumps(generation_config)
+
     # Insert session record
     cur.execute("""INSERT INTO sessions
                    (created_at, dish, portion_guess_g, ingredients_json, refinements_json,
-                    final_json, confidence_score, tool_calls_count)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", (
+                    final_json, confidence_score, tool_calls_count,
+                    model_name, prompt_version, generation_config_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
         time.time(),
         estimate.dish,
         estimate.portion_guess_g,
@@ -112,7 +144,10 @@ def log_session(estimate, refinements=None, final_json=None, tool_calls_count=0)
         refinements_json,
         final_json or "",
         confidence_score,
-        tool_calls_count
+        tool_calls_count,
+        model_name,
+        prompt_version,
+        generation_config_json
     ))
 
     session_id = cur.lastrowid
@@ -174,6 +209,46 @@ def log_search_query(session_id: int, query: str, results_count: int):
 
     con.commit()
     con.close()
+
+
+def log_usda_candidates(session_id: int, ingredient_name: str, candidates: List[Dict], selected_fdc_id: Optional[int] = None):
+    """
+    Log USDA candidate matches for explainability (P2-E2).
+
+    Args:
+        session_id: ID of the session
+        ingredient_name: Name of the ingredient that was searched
+        candidates: List of top-3 candidate dicts with fdcId, description, score, dataType
+        selected_fdc_id: FDC ID of the selected candidate (if any)
+    """
+    if not candidates:
+        return
+
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+
+    for rank, candidate in enumerate(candidates, start=1):
+        fdc_id = candidate.get('fdcId')
+        is_selected = (fdc_id == selected_fdc_id) if selected_fdc_id else (rank == 1)
+
+        cur.execute("""INSERT INTO usda_candidates
+                       (session_id, ingredient_name, candidate_rank, fdc_id, description,
+                        score, data_type, selected, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+            session_id,
+            ingredient_name,
+            rank,
+            fdc_id,
+            candidate.get('description', ''),
+            candidate.get('score', 0.0),
+            candidate.get('dataType', ''),
+            is_selected,
+            time.time()
+        ))
+
+    con.commit()
+    con.close()
+    print(f"DEBUG: Logged {len(candidates)} USDA candidates for '{ingredient_name}' in session {session_id}")
 
 
 def calculate_confidence_score(estimate, refinements=None) -> float:

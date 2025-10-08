@@ -9,6 +9,9 @@ from difflib import SequenceMatcher
 import time
 import re
 import math
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config.privacy import sanitize_metrics
 
 # Global API key storage
 _api_key: Optional[str] = None
@@ -280,6 +283,34 @@ def _is_likely_non_food(food: Dict) -> bool:
         return False  # Don't reject on error
 
 
+def _llm_tiebreaker(query: str, candidates: List[Dict]) -> Optional[Dict]:
+    """
+    Use LLM to pick the best match when multiple candidates have similar scores.
+
+    Args:
+        query: Original search query
+        candidates: List of candidate foods with similar scores (sorted by score descending)
+
+    Returns:
+        Best matching food or first candidate if tiebreaker fails
+    """
+    if not candidates:
+        return None
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # Import here to avoid circular dependency
+    import sys
+    import os
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from core.tool_runner import llm_tiebreak
+
+    # Call centralized tiebreaker (safe box with frozen config)
+    pick_index = llm_tiebreak(query, candidates[:3])  # Limit to top 3
+    return candidates[pick_index] if 0 <= pick_index < len(candidates) else candidates[0]
+
+
 def _select_best_match(query: str, foods: List[Dict], must_tokens: Optional[Set[str]] = None) -> Optional[Dict]:
     """
     Select the best matching food from search results using structure-aware scoring.
@@ -289,6 +320,7 @@ def _select_best_match(query: str, foods: List[Dict], must_tokens: Optional[Set[
     - Critical modifiers: enforces diet/zero/skim/2%/90% lean etc. if present in query
     - BM25-like scoring: dynamically downweights generic terms without stopword lists
     - Data type preference: FNDDS > SR Legacy > Branded
+    - LLM tiebreaker: when multiple candidates have close scores (<10% difference)
 
     Args:
         query: Search query
@@ -311,8 +343,7 @@ def _select_best_match(query: str, foods: List[Dict], must_tokens: Optional[Set[
         re.I
     )
 
-    best_food = None
-    best_score = -1.0
+    scored_foods = []  # Track all scored foods for tiebreaking
 
     for food in foods:
         desc = food.get('description', '') or ''
@@ -368,17 +399,116 @@ def _select_best_match(query: str, foods: List[Dict], must_tokens: Optional[Set[
 
         score = 0.75 * bm25 + 0.25 * seq + dtype_bonus - extra_penalty - missing_penalty
 
-        if score > best_score:
-            best_score = score
-            best_food = food
+        # Store scored food
+        scored_foods.append((score, food))
 
-    return best_food
+    # Sort by score descending
+    scored_foods.sort(key=lambda x: x[0], reverse=True)
+
+    if not scored_foods:
+        return None
+
+    # Get best score
+    best_score = scored_foods[0][0]
+
+    # Store top-3 candidates for explainability (P2-E2)
+    top3_candidates = [
+        {
+            "description": food.get('description'),
+            "fdcId": food.get('fdcId'),
+            "score": score,
+            "dataType": food.get('dataType', 'Unknown')
+        }
+        for score, food in scored_foods[:3]
+    ]
+
+    # Check for close matches (within 10% of best score)
+    close_threshold = best_score * 0.9
+    close_matches = [food for score, food in scored_foods if score >= close_threshold]
+
+    # If multiple close matches AND they're ambiguous, return clarification metadata
+    # Caller can decide to ask user or use tiebreaker
+    if len(close_matches) > 1:
+        # Check if matches are semantically different (e.g., "sweet potato fries" vs "fries")
+        descriptions = [food.get('description', '').lower() for food in close_matches[:3]]
+
+        # If descriptions differ by key modifiers, this is ambiguous
+        key_modifiers = ["sweet", "veggie", "turkey", "chicken", "beef", "pork"]
+        has_conflicting_modifiers = False
+        for mod in key_modifiers:
+            appears_in = [mod in desc for desc in descriptions]
+            if any(appears_in) and not all(appears_in):
+                has_conflicting_modifiers = True
+                break
+
+        if has_conflicting_modifiers:
+            print(f"DEBUG: Ambiguous matches detected - conflicting modifiers")
+            metric = {'event': 'usda_ambiguous', 'query': query, 'candidates': len(close_matches)}
+            print(f"METRICS: {json.dumps(sanitize_metrics(metric))}")
+            # Return special marker for caller to handle
+            return {
+                "_ambiguous": True,
+                "_query": query,
+                "_candidates": top3_candidates,
+                "_top3": top3_candidates  # P2-E2 explainability
+            }
+
+        # Check if top-2 candidates have sanity gate conflicts
+        # If one would pass and one would fail, abstain and return ambiguous for user clarification
+        if len(close_matches) >= 2:
+            top2 = close_matches[:2]
+            sanity_results = []
+
+            for candidate in top2:
+                macros = per100g_macros(candidate)
+                # Quick sanity check (simplified version of nutrition_lookup sanity gate)
+                passes_sanity = True
+
+                # Check diet/zero keywords with high calories
+                desc_lower = candidate.get('description', '').lower()
+                if any(kw in desc_lower for kw in ['diet', 'zero', 'sugar-free', 'unsweetened']):
+                    if macros['kcal'] > 20:  # Diet should be <10 kcal per 100g
+                        passes_sanity = False
+
+                # Check "lean" with high fat
+                if 'lean' in desc_lower:
+                    if macros['fat_g'] > 15:  # Lean should be <15% fat
+                        passes_sanity = False
+
+                sanity_results.append(passes_sanity)
+
+            # If exactly one passes sanity (conflict), abstain and ask user
+            if sum(sanity_results) == 1:
+                print(f"DEBUG: Tiebreaker abstain - sanity gate conflict between top-2 candidates")
+                metric = {'event': 'usda_tiebreak_abstain', 'reason': 'sanity_conflict', 'query': query}
+                print(f"METRICS: {json.dumps(sanitize_metrics(metric))}")
+                return {
+                    "_ambiguous": True,
+                    "_query": query,
+                    "_candidates": top3_candidates,
+                    "_top3": top3_candidates,
+                    "_reason": "sanity_gate_conflict"
+                }
+
+        # No conflicting modifiers or sanity issues - safe to use tiebreaker
+        print(f"DEBUG: Found {len(close_matches)} close matches (no conflicts), using LLM tiebreaker")
+        metric = {'event': 'usda_tiebreak', 'invoked': True, 'query': query, 'candidates': len(close_matches)}
+        print(f"METRICS: {json.dumps(sanitize_metrics(metric))}")
+        best_match = _llm_tiebreaker(query, close_matches)
+        # Attach explainability metadata
+        best_match["_top3"] = top3_candidates
+        return best_match
+
+    # Return best match with explainability metadata
+    best_match = scored_foods[0][1]
+    best_match["_top3"] = top3_candidates
+    return best_match
 
 
 def search_best_match(query: str) -> Optional[Dict]:
     """
     Search for the best matching food in USDA database.
-    Uses multi-strategy search with critical modifier extraction.
+    Uses multi-strategy search with critical modifier extraction and LLM tiebreaking.
 
     Args:
         query: Food name to search for
@@ -400,6 +530,7 @@ def search_best_match(query: str) -> Optional[Dict]:
         if result and 'foods' in result and result['foods']:
             best_match = _select_best_match(query_clean, result['foods'], must_tokens=critical_tokens)
             if best_match and _calculate_similarity(query_clean, best_match.get('description', '')) > 0.5:
+                print(f"METRICS: {json.dumps({'event': 'usda_match', 'strategy': '1_exact_query', 'query': query_clean, 'fdc_id': best_match.get('fdcId')})}")
                 print(f"USDA match for '{query_clean}': {best_match.get('description', 'Unknown')} (FDC: {best_match.get('fdcId', 'N/A')})")
                 return best_match
 
@@ -413,6 +544,7 @@ def search_best_match(query: str) -> Optional[Dict]:
                 if result and result.get('foods'):
                     best_match = _select_best_match(base_before, result['foods'], must_tokens=critical_tokens)
                     if best_match and _calculate_similarity(base_before, best_match.get('description', '')) > 0.5:
+                        print(f"METRICS: {json.dumps({'event': 'usda_match', 'strategy': '2a_base_before_parens', 'query': query_clean, 'fdc_id': best_match.get('fdcId')})}")
                         print(f"USDA match for '{base_before}': {best_match.get('description', 'Unknown')} (FDC: {best_match.get('fdcId', 'N/A')})")
                         return best_match
 
@@ -425,6 +557,7 @@ def search_best_match(query: str) -> Optional[Dict]:
             if result and 'foods' in result and result['foods']:
                 best_match = _select_best_match(query_no_parens, result['foods'], must_tokens=critical_tokens)
                 if best_match and _calculate_similarity(query_no_parens, best_match.get('description', '')) > 0.5:
+                    print(f"METRICS: {json.dumps({'event': 'usda_match', 'strategy': '2b_no_parens', 'query': query_clean, 'fdc_id': best_match.get('fdcId')})}")
                     print(f"USDA match for '{query_no_parens}': {best_match.get('description', 'Unknown')} (FDC: {best_match.get('fdcId', 'N/A')})")
                     return best_match
 
@@ -440,6 +573,7 @@ def search_best_match(query: str) -> Optional[Dict]:
                 best_match = _select_best_match(query_base, result['foods'], must_tokens=critical_tokens)
                 # Require similarity > 0.45 to avoid bad tail matches
                 if best_match and _calculate_similarity(query_base, best_match.get('description', '')) > 0.45:
+                    print(f"METRICS: {json.dumps({'event': 'usda_match', 'strategy': '3_base_words', 'query': query_clean, 'fdc_id': best_match.get('fdcId')})}")
                     print(f"USDA match for '{query_base}': {best_match.get('description', 'Unknown')} (FDC: {best_match.get('fdcId', 'N/A')})")
                     return best_match
 

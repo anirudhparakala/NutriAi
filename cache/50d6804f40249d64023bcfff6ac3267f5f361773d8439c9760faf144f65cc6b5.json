@@ -1,0 +1,17 @@
+{
+  "key": "vision:gemini-2.5-flash-lite:27adc5d:image_hash=c9b27a65dd17d8157b51d36d36b54305ec13cea89152ba0e24b5465eb3cbb0c7",
+  "value": {
+    "dish": "Empty plate",
+    "portion_guess_g": 0.0,
+    "ingredients": [],
+    "critical_questions": [],
+    "raw_model": {
+      "dish": "Empty plate",
+      "portion_guess_g": 0,
+      "ingredients": [],
+      "critical_questions": []
+    }
+  },
+  "ttl": 259200,
+  "created_at": 1759955019.0198853
+}

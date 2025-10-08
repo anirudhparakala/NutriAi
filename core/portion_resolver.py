@@ -224,7 +224,7 @@ def _clamp_by_category(name: str, grams: float) -> float:
     return grams
 
 
-def resolve_portions(items: List[Dict[str, Any]], usda_client=None) -> List[Dict[str, Any]]:
+def resolve_portions(items: List[Dict[str, Any]], usda_client=None) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
     """
     Resolve portion sizes to deterministic grams.
 
@@ -240,9 +240,16 @@ def resolve_portions(items: List[Dict[str, Any]], usda_client=None) -> List[Dict
         usda_client: Optional USDA client for foodPortions lookup
 
     Returns:
-        Updated items list with resolved grams
+        Tuple of (updated items list with resolved grams, metrics dict with tier counts)
     """
     out = []
+    metrics = {
+        "user_vision": 0,
+        "brand_size": 0,
+        "usda_portions": 0,
+        "category_heuristic": 0,
+        "unresolved": 0
+    }
 
     for item in items:
         name = item.get("name", "")
@@ -253,9 +260,10 @@ def resolve_portions(items: List[Dict[str, Any]], usda_client=None) -> List[Dict
 
         # 1) Keep user/vision-stated grams (explicit amounts only)
         if source in ("user", "vision") and isinstance(grams, (int, float)) and grams > 0:
-            print(f"DEBUG: Keeping {source}-stated grams for '{name}': {grams}g")
+            print(f"DEBUG: Portion resolver tier 1 (user/vision): '{name}' = {grams}g")
             # Still apply sanity clamp even for user/vision
             item["amount"] = _clamp_by_category(name, grams)
+            metrics["user_vision"] += 1
             out.append(item)
             continue
 
@@ -269,37 +277,56 @@ def resolve_portions(items: List[Dict[str, Any]], usda_client=None) -> List[Dict
         resolved_grams = _brand_size_lookup(name, combined_context)
         if resolved_grams:
             resolution_source = "brand-size-lookup"
-            print(f"DEBUG: Resolved '{name}' via brand+size: {resolved_grams}g (label: '{portion_label}')")
+            metrics["brand_size"] += 1
+            print(f"DEBUG: Portion resolver tier 2 (brand+size): '{name}' = {resolved_grams}g")
 
         # 3) USDA foodPortions (TODO: implement when needed)
         # if not resolved_grams and usda_client:
         #     resolved_grams = _grams_from_usda_portions(usda_client, name, portion_label)
         #     resolution_source = "usda-portions"
+        #     metrics["usda_portions"] += 1
 
         # 4) Category heuristics (uses portion_label)
         if not resolved_grams:
             resolved_grams = _category_heuristics(name, combined_context)
             if resolved_grams:
                 resolution_source = "category-heuristic"
-                print(f"DEBUG: Resolved '{name}' via category heuristic: {resolved_grams}g (label: '{portion_label}')")
+                metrics["category_heuristic"] += 1
+                print(f"DEBUG: Portion resolver tier 4 (category heuristic): '{name}' = {resolved_grams}g")
 
         # 5) Fallback to vision estimate (only if amount was set from vision but source wasn't 'vision')
         if not resolved_grams and isinstance(grams, (int, float)) and grams > 0:
             resolved_grams = grams
             resolution_source = "vision-estimate-fallback"
-            print(f"DEBUG: Using vision estimate fallback for '{name}': {resolved_grams}g")
+            metrics["category_heuristic"] += 1  # Count as heuristic since it's not explicit
+            print(f"DEBUG: Portion resolver tier 5 (vision fallback): '{name}' = {resolved_grams}g")
 
         # Apply category-based sanity clamp
         if resolved_grams:
             resolved_grams = _clamp_by_category(name, resolved_grams)
             item["amount"] = resolved_grams
             item["portion_source"] = resolution_source
+            item["source"] = "portion-resolver"  # Mark that resolver set this
         else:
             # No resolution found - set a safe default to prevent None errors downstream
-            print(f"WARNING: Could not resolve portion for '{name}' (portion_label: '{portion_label}')")
+            metrics["unresolved"] += 1
+            print(f"WARNING: Portion resolver tier N/A (unresolved): '{name}' using 100g default")
             item["amount"] = 100.0  # Safe default
             item["portion_source"] = "default-fallback"
+            item["source"] = "portion-resolver"
 
         out.append(item)
 
-    return out
+    # Log metrics summary as JSON for easy parsing
+    import json
+    total_items = sum(metrics.values())
+    tier_rates = {tier: (count / total_items) * 100 if total_items > 0 else 0 for tier, count in metrics.items()}
+
+    print(f"METRICS: {json.dumps({'event': 'portion_resolver', 'tiers': metrics, 'tier_rates_pct': tier_rates})}")
+
+    # Log warning if heuristic rate is high (colleague wants this trending down)
+    heuristic_rate = tier_rates.get('category_heuristic', 0)
+    if heuristic_rate > 20:  # >20% using heuristics
+        print(f"WARNING: High heuristic usage rate: {heuristic_rate:.1f}% (target: <20%)")
+
+    return out, metrics
