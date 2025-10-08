@@ -78,10 +78,14 @@ available_tools = {
     "perform_web_search": search_function,
 }
 
+# When using tools, we cannot use response_mime_type (Gemini API constraint)
+# Remove it from generation config for tool-enabled model
+tool_compatible_config = {k: v for k, v in GENERATION_CONFIG.items() if k != "response_mime_type"}
+
 model = genai.GenerativeModel(
     model_name=MODEL_NAME,
     tools=[my_search_tool],
-    generation_config=GENERATION_CONFIG
+    generation_config=tool_compatible_config
 )
 
 # Log model configuration at startup

@@ -125,7 +125,6 @@ Please retry the request and provide ONLY the JSON response.
         # Store raw model response for debugging
         if parsed_update:
             try:
-                import json
                 parsed_update.raw_model = json.loads(response_text)
             except:
                 parsed_update.raw_model = {"raw_text": response_text}

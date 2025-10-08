@@ -115,9 +115,13 @@ def run_with_tools(
         Tuple of (final_text_response, tool_calls_count)
     """
     # Validate model config matches frozen determinism settings
+    # Skip response_mime_type when tools are used (Gemini API constraint)
     model_config = chat.model._generation_config if hasattr(chat.model, '_generation_config') else None
     if model_config:
         for key, expected_val in GENERATION_CONFIG.items():
+            # Skip response_mime_type check when tools are present
+            if key == "response_mime_type" and hasattr(chat.model, 'tools') and chat.model.tools:
+                continue
             actual_val = getattr(model_config, key, None)
             if actual_val != expected_val:
                 print(f"WARNING: Model config mismatch - {key}: expected {expected_val}, got {actual_val}")

@@ -168,12 +168,23 @@ Please retry the request and provide ONLY the JSON response.
 
             # Apply UX guardrail: filter questions to max 2, high-impact only
             if parsed_estimate.critical_questions:
+                from core.schemas import ClarificationQuestion
                 original_count = len(parsed_estimate.critical_questions)
-                parsed_estimate.critical_questions = filter_critical_questions(
-                    [q.model_dump() if hasattr(q, 'model_dump') else q for q in parsed_estimate.critical_questions],
+
+                # Convert to dicts for filtering
+                questions_as_dicts = [q.model_dump() if hasattr(q, 'model_dump') else q for q in parsed_estimate.critical_questions]
+                filtered_dicts = filter_critical_questions(
+                    questions_as_dicts,
                     parsed_estimate.portion_guess_g,
                     max_questions=2
                 )
+
+                # Convert back to ClarificationQuestion objects
+                parsed_estimate.critical_questions = [
+                    ClarificationQuestion(**q) if isinstance(q, dict) else q
+                    for q in filtered_dicts
+                ]
+
                 if original_count != len(parsed_estimate.critical_questions):
                     print(f"INFO: Question budget applied - reduced from {original_count} to {len(parsed_estimate.critical_questions)} questions")
 
