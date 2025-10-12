@@ -1,0 +1,99 @@
+{
+  "key": "vision:gemini-2.5-flash-lite:b999141:image_hash=331474444af8201588a591653065f83d55a55b1033c9dc4d5ef46f3acd22b0c8",
+  "value": {
+    "dish": "Dal and rice",
+    "portion_guess_g": 400.0,
+    "ingredients": [
+      {
+        "name": "basmati rice (cooked)",
+        "amount": null,
+        "unit": "g",
+        "source": "estimation",
+        "portion_label": "1.5 cups",
+        "notes": null
+      },
+      {
+        "name": "dal tadka",
+        "amount": null,
+        "unit": "g",
+        "source": "estimation",
+        "portion_label": "1 cup",
+        "notes": null
+      }
+    ],
+    "critical_questions": [
+      {
+        "id": "dal_type",
+        "text": "Type of dal?",
+        "options": [
+          "toor dal",
+          "moong dal",
+          "masoor dal",
+          "mixed dal"
+        ],
+        "default": "toor dal",
+        "impact_score": 0.7,
+        "follow_up_prompt": null
+      },
+      {
+        "id": "dal_ghee",
+        "text": "Cooked with ghee?",
+        "options": [
+          "yes",
+          "no"
+        ],
+        "default": "yes",
+        "impact_score": 0.5,
+        "follow_up_prompt": null
+      }
+    ],
+    "raw_model": {
+      "dish": "Dal and rice",
+      "portion_guess_g": 400,
+      "ingredients": [
+        {
+          "name": "basmati rice (cooked)",
+          "amount": null,
+          "unit": "g",
+          "source": "estimation",
+          "portion_label": "1.5 cups",
+          "notes": null
+        },
+        {
+          "name": "dal tadka",
+          "amount": null,
+          "unit": "g",
+          "source": "estimation",
+          "portion_label": "1 cup",
+          "notes": null
+        }
+      ],
+      "critical_questions": [
+        {
+          "id": "dal_type",
+          "text": "Type of dal?",
+          "options": [
+            "toor dal",
+            "moong dal",
+            "masoor dal",
+            "mixed dal"
+          ],
+          "default": "toor dal",
+          "impact_score": 0.7
+        },
+        {
+          "id": "dal_ghee",
+          "text": "Cooked with ghee?",
+          "options": [
+            "yes",
+            "no"
+          ],
+          "default": "yes",
+          "impact_score": 0.5
+        }
+      ]
+    }
+  },
+  "ttl": 259200,
+  "created_at": 1759980339.476131
+}

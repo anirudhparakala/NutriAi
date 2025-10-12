@@ -12,6 +12,11 @@ class Ingredient(BaseModel):
     portion_label: str | None = None  # size/variant label when grams unknown (e.g., "medium", "large", "2 cups")
     notes: str | None = None        # e.g., "boneless, skinless"
 
+    # Optional fields for composite dishes (biryani, salads, etc.)
+    container_type: Literal["plate","bowl","tray","glass","cup","side"] | None = None
+    fill_level: Literal["half","level","heaping"] | None = None
+    composition_ratios: dict[str, float] | None = None  # e.g., {"starch": 0.55, "protein": 0.30, "fat": 0.15}
+
     @model_validator(mode='after')
     def validate_amount_source_contract(self):
         """

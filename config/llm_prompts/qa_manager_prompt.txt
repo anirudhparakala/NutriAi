@@ -105,7 +105,62 @@ Add/remove logic
 
 Words like none / no / without / skip → remove the component referenced by the matched question or by a clear ingredient name in the answer. If it's unclear what to remove, ignore the "none" token (do not delete arbitrary items).
 
-If the user adds a component (e.g., ghee, cream, peanut butter), add it with a reasonable gram estimate (or brand amount if searched).
+**CRITICAL — Decompose compound items when components are confirmed:**
+
+When ANY answer implies added components or preparation details (e.g., "protein_powder: yes", "ghee_used: yes", "dressing_type: ranch"), you MUST output separate ingredient rows for each component. DO NOT fold components into notes.
+
+**Decomposition is MANDATORY when:**
+- User confirms protein powder, scoop count, or protein type → separate rows for base liquid + protein powder + any flavorings
+- User confirms cooking fat (ghee/butter/oil) → separate row for the fat
+- User confirms add-ins (nuts, cheese, dressing) → separate rows for each
+
+**Decomposition rules (STRICT):**
+1. **DELETE** the original composite item completely from updated_ingredients
+2. **ADD** separate ingredient entries for each confirmed component
+3. **DO NOT** keep both composite AND components - this double-counts calories
+4. Each component gets its own row with portion_label (NOT grams unless user stated exact weight)
+
+**If confidence is low** for a composite dish (smoothie/shake/rice-mix/salad/pasta/bowl), prefer componentized output over a single catch-all item
+
+**Decomposition Examples:**
+
+Vision returned: "chocolate smoothie"
+User answers: {"smoothie_base": "whole milk", "smoothie_protein_powder": "yes"}
+
+✅ CORRECT:
+```json
+{
+  "updated_ingredients": [
+    {"name": "milk (whole)", "amount": null, "unit": "g", "source": "estimation", "portion_label": "1 cup", "notes": null},
+    {"name": "protein powder (whey)", "amount": null, "unit": "g", "source": "estimation", "portion_label": "1 scoop", "notes": null},
+    {"name": "chocolate syrup", "amount": null, "unit": "g", "source": "estimation", "portion_label": "2 tbsp", "notes": null}
+  ]
+}
+```
+Only 3 separate components. NO "chocolate smoothie" item.
+
+❌ WRONG (keeping composite):
+```json
+{"updated_ingredients": [{"name": "chocolate smoothie", ..., "notes": "made with milk and protein powder"}]}
+```
+This will match low-protein USDA smoothie entries.
+
+Vision returned: "chicken biryani"
+User answers: {"biryani_protein": "bone-in", "ghee_used": "yes"}
+
+✅ CORRECT:
+```json
+{
+  "updated_ingredients": [
+    {"name": "basmati rice (cooked)", "amount": null, "unit": "g", "source": "estimation", "portion_label": "large plate", "notes": null},
+    {"name": "chicken (bone-in, cooked)", "amount": null, "unit": "g", "source": "estimation", "portion_label": "4 pieces", "notes": null},
+    {"name": "ghee", "amount": null, "unit": "g", "source": "estimation", "portion_label": "1 tbsp", "notes": null},
+    {"name": "raita", "amount": null, "unit": "g", "source": "estimation", "portion_label": "side", "notes": null}
+  ]
+}
+```
+
+Only add components explicitly confirmed by user answers. Do not invent add-ins.
 
 Typos & abbreviations
 Be robust to common typos/short forms: reg→regular, med→medium, lg→large, diet sooda→diet soda, w/→with, w/o→without. Normalize these before applying transformations.

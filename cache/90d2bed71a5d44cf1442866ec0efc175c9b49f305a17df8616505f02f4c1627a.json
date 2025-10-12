@@ -1,0 +1,61 @@
+{
+  "key": "vision:gemini-2.5-flash-lite:b999141:image_hash=aab599be3920a462ea02f5a80afb2cf579d4a42b9a51271c3e279e65ca96748c",
+  "value": {
+    "dish": "McDonald's Cheeseburger Meal",
+    "portion_guess_g": 800.0,
+    "ingredients": [
+      {
+        "name": "cheeseburger",
+        "amount": null,
+        "unit": "g",
+        "source": "estimation",
+        "portion_label": "single",
+        "notes": "McDonald's",
+        "container_type": null,
+        "fill_level": null,
+        "composition_ratios": null
+      },
+      {
+        "name": "potato fries",
+        "amount": null,
+        "unit": "g",
+        "source": "estimation",
+        "portion_label": "medium",
+        "notes": "McDonald's",
+        "container_type": null,
+        "fill_level": null,
+        "composition_ratios": null
+      },
+      {
+        "name": "cola",
+        "amount": null,
+        "unit": "g",
+        "source": "estimation",
+        "portion_label": "medium",
+        "notes": "McDonald's",
+        "container_type": null,
+        "fill_level": null,
+        "composition_ratios": null
+      }
+    ],
+    "critical_questions": [
+      {
+        "id": "drink_variant",
+        "text": "Drink type?",
+        "options": [
+          "regular",
+          "diet",
+          "zero"
+        ],
+        "default": "regular",
+        "impact_score": 0.7,
+        "follow_up_prompt": null
+      }
+    ],
+    "raw_model": {
+      "raw_text": "I need more information to accurately estimate the nutritional content. Please provide details about the specific items, such as the type of burger, the size of the fries and drink, and any customizations.\n"
+    }
+  },
+  "ttl": 259200,
+  "created_at": 1760236353.6427643
+}

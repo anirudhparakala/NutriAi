@@ -464,8 +464,9 @@ def _select_best_match(query: str, foods: List[Dict], must_tokens: Optional[Set[
                 # Quick sanity check (simplified version of nutrition_lookup sanity gate)
                 passes_sanity = True
 
-                # Check diet/zero keywords with high calories
                 desc_lower = candidate.get('description', '').lower()
+
+                # Check diet/zero keywords with high calories
                 if any(kw in desc_lower for kw in ['diet', 'zero', 'sugar-free', 'unsweetened']):
                     if macros['kcal'] > 20:  # Diet should be <10 kcal per 100g
                         passes_sanity = False
@@ -474,6 +475,12 @@ def _select_best_match(query: str, foods: List[Dict], must_tokens: Optional[Set[
                 if 'lean' in desc_lower:
                     if macros['fat_g'] > 15:  # Lean should be <15% fat
                         passes_sanity = False
+
+                # Check protein powder with low protein
+                if any(kw in desc_lower for kw in ['protein powder', 'whey', 'casein', 'protein supplement']):
+                    if macros['protein_g'] < 50:  # Protein powder should be ≥50g protein per 100g
+                        passes_sanity = False
+                        print(f"DEBUG: Sanity gate reject - '{desc_lower}' has only {macros['protein_g']}g protein/100g (expected ≥50g)")
 
                 sanity_results.append(passes_sanity)
 

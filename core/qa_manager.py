@@ -1,5 +1,6 @@
 import google.generativeai as genai
 import json
+from typing import List, Dict, Any
 from .schemas import RefinementUpdate, VisionEstimate, Explanation
 from .json_repair import parse_or_repair_json, llm_retry_with_system_hardener
 from .tool_runner import run_with_tools
@@ -42,6 +43,9 @@ Required JSON Output Format:
   ]
 }
 """
+
+
+# Decomposition logic removed - LLM handles all ingredient decomposition via QA prompts
 
 
 def refine(context: str, user_input: str | dict, chat_session: genai.ChatSession, available_tools: dict = None) -> tuple[RefinementUpdate | None, int]:
@@ -87,7 +91,27 @@ Based on this information, provide the JSON response with any updates to ingredi
 
         # Send message to chat session with tool support
         # Always route through run_with_tools for consistent error handling
-        response_text, tool_calls_count = run_with_tools(chat_session, available_tools or {}, full_prompt)
+        try:
+            response_text, tool_calls_count = run_with_tools(chat_session, available_tools or {}, full_prompt)
+        except ValueError as e:
+            # LLM returned empty response - retry once
+            print(f"ERROR: LLM returned empty response on first attempt: {e}")
+            print(f"DEBUG: Retrying QA refinement with simpler prompt")
+            retry_prompt = f"""
+User answers: {input_text}
+
+Return JSON with updated ingredients list. Each ingredient needs: name, amount (null if unknown), unit ("g"), source, portion_label, notes.
+
+{{
+  "updated_ingredients": [...],
+  "updated_assumptions": [...]
+}}
+"""
+            try:
+                response_text, tool_calls_count = run_with_tools(chat_session, available_tools or {}, retry_prompt)
+            except ValueError as retry_error:
+                print(f"ERROR: Retry also failed: {retry_error}")
+                return None, 0
 
         print(f"DEBUG: LLM response received, length: {len(response_text)} chars")
         print(f"DEBUG: LLM response text: {response_text[:500]}...")
@@ -186,12 +210,23 @@ def generate_final_calculation(chat_session: genai.ChatSession, available_tools:
                         "amount": ingredient.get('amount', 0)
                     })
 
+        # Collect assumptions from refinements
+        assumptions = []
+
         # Apply refinements - Trust the LLM's output completely
         # The LLM is given full context (original ingredients + questions + answers)
         # and is smart enough to return the correct updated ingredient list
         if refinements:
             print(f"DEBUG: Applying {len(refinements)} refinements")
             for refinement in refinements:
+                # Collect assumptions
+                if hasattr(refinement, 'updated_assumptions') and refinement.updated_assumptions:
+                    for assumption in refinement.updated_assumptions:
+                        if hasattr(assumption, 'model_dump'):
+                            assumptions.append(assumption.model_dump())
+                        elif isinstance(assumption, dict):
+                            assumptions.append(assumption)
+
                 if hasattr(refinement, 'updated_ingredients') and refinement.updated_ingredients:
                     updated_count = len(refinement.updated_ingredients)
                     original_count = len(ingredients)
@@ -204,26 +239,50 @@ def generate_final_calculation(chat_session: genai.ChatSession, available_tools:
                         print(f"DEBUG: Complete replacement - LLM provided full updated list")
                         ingredients = []
                         for updated_ingredient in refinement.updated_ingredients:
-                            name = updated_ingredient.name if hasattr(updated_ingredient, 'name') else updated_ingredient.get('name', '')
-                            amount = updated_ingredient.amount if hasattr(updated_ingredient, 'amount') else updated_ingredient.get('amount', 0)
-                            ingredients.append({"name": name, "amount": amount})
-                            print(f"DEBUG:   - {name}: {amount}g")
+                            # Preserve ALL fields from refinement (portion_label, notes, source, etc.)
+                            if hasattr(updated_ingredient, 'model_dump'):
+                                ingredient_dict = updated_ingredient.model_dump()
+                            elif isinstance(updated_ingredient, dict):
+                                ingredient_dict = updated_ingredient.copy()
+                            else:
+                                # Fallback for unexpected types
+                                ingredient_dict = {
+                                    "name": updated_ingredient.name if hasattr(updated_ingredient, 'name') else '',
+                                    "amount": updated_ingredient.amount if hasattr(updated_ingredient, 'amount') else None
+                                }
+
+                            ingredients.append(ingredient_dict)
+                            # Log with all important fields for debugging
+                            portion_label = ingredient_dict.get('portion_label', '')
+                            notes = ingredient_dict.get('notes', '')
+                            amount = ingredient_dict.get('amount', 'None')
+                            print(f"DEBUG: Ingredient merged → name='{ingredient_dict.get('name')}', portion_label='{portion_label}', notes='{notes}', amount={amount}g")
                     else:
                         print(f"DEBUG: Partial update - merging specific changes")
                         for updated_ingredient in refinement.updated_ingredients:
-                            name = updated_ingredient.name if hasattr(updated_ingredient, 'name') else updated_ingredient.get('name', '')
-                            amount = updated_ingredient.amount if hasattr(updated_ingredient, 'amount') else updated_ingredient.get('amount', 0)
+                            # Preserve ALL fields from refinement
+                            if hasattr(updated_ingredient, 'model_dump'):
+                                new_ingredient_dict = updated_ingredient.model_dump()
+                            elif isinstance(updated_ingredient, dict):
+                                new_ingredient_dict = updated_ingredient.copy()
+                            else:
+                                new_ingredient_dict = {
+                                    "name": updated_ingredient.name if hasattr(updated_ingredient, 'name') else '',
+                                    "amount": updated_ingredient.amount if hasattr(updated_ingredient, 'amount') else None
+                                }
 
-                            # Find and replace by fuzzy matching (handles variants like "cola" -> "cola (diet)")
+                            name = new_ingredient_dict.get('name', '')
                             name_lower = name.lower()
                             found = False
+
+                            # Find and replace by fuzzy matching (handles variants like "cola" -> "cola (diet)")
                             for i, existing in enumerate(ingredients):
                                 existing_name = existing.get('name', '').lower()
 
                                 # Exact match
                                 if existing_name == name_lower:
-                                    ingredients[i] = {"name": name, "amount": amount}
-                                    print(f"DEBUG:   - Replaced (exact): {name}: {amount}g")
+                                    ingredients[i] = new_ingredient_dict
+                                    print(f"DEBUG:   - Replaced (exact): name='{name}', portion_label='{new_ingredient_dict.get('portion_label')}', notes='{new_ingredient_dict.get('notes')}'")
                                     found = True
                                     break
 
@@ -234,18 +293,18 @@ def generate_final_calculation(chat_session: genai.ChatSession, available_tools:
 
                                 if existing_base == new_base:
                                     # Same base ingredient, replace with the more specific variant
-                                    ingredients[i] = {"name": name, "amount": amount}
-                                    print(f"DEBUG:   - Replaced (variant): '{existing.get('name')}' with '{name}': {amount}g")
+                                    ingredients[i] = new_ingredient_dict
+                                    print(f"DEBUG:   - Replaced (variant): '{existing.get('name')}' with name='{name}', portion_label='{new_ingredient_dict.get('portion_label')}', notes='{new_ingredient_dict.get('notes')}'")
                                     found = True
                                     break
 
                             if not found:
                                 # New ingredient, append it
-                                ingredients.append({"name": name, "amount": amount})
-                                print(f"DEBUG:   - Added new: {name}: {amount}g")
+                                ingredients.append(new_ingredient_dict)
+                                print(f"DEBUG:   - Added new: name='{name}', portion_label='{new_ingredient_dict.get('portion_label')}', notes='{new_ingredient_dict.get('notes')}'")
 
-        # Step 2: Canonicalize names (normalize aliases, portion labels)
-        from .normalize import canonicalize_name, canonicalize_portion_label
+        # Step 2: Canonicalize names (normalize aliases, portion labels) and categorize
+        from .normalize import canonicalize_name, canonicalize_portion_label, categorize_food
         print(f"DEBUG: Canonicalizing {len(ingredients)} ingredient names")
         for ingredient in ingredients:
             original_name = ingredient.get("name", "")
@@ -257,6 +316,12 @@ def generate_final_calculation(chat_session: genai.ChatSession, available_tools:
 
             # Canonicalize portion label
             canonical_portion = canonicalize_portion_label(original_portion)
+
+            # Categorize for portion resolution
+            category = categorize_food(canonical_name if canonical_name else original_name)
+            if category:
+                ingredient["category"] = category
+                print(f"DEBUG: Categorized '{ingredient.get('name')}' as '{category}'")
 
             if canonical_name != original_name:
                 print(f"DEBUG: Canonicalized name: '{original_name}' → '{canonical_name}'")

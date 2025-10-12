@@ -40,7 +40,71 @@ BRAND_SIZE_PORTIONS = {
 }
 
 
-# Category-based portion bounds (for sanity clamping)
+# Beverage density map (g/mL)
+BEVERAGE_DENSITY = {
+    "milk": 1.03,
+    "whole milk": 1.03,
+    "2% milk": 1.03,
+    "skim milk": 1.03,
+    "almond milk": 1.01,
+    "soy milk": 1.03,
+    "oat milk": 1.03,
+    "water": 1.0,
+    "juice": 1.04,
+    "soda": 1.04,
+    "cola": 1.04,
+    "default": 1.0,  # default for unknown liquids
+}
+
+
+# Scoop sizes for powder products (grams per scoop)
+SCOOP_SIZES = {
+    "protein powder": 30,  # standard scoop
+    "whey": 30,
+    "casein": 30,
+    "plant protein": 30,
+    "default": 30,
+}
+
+
+# Container capacity mappings: (container_type, size, category) -> (base_grams, clamp_min, clamp_max)
+CONTAINER_CAPACITY = {
+    # Rice-based mixed mains (biryani, pulao, fried rice, etc.)
+    ("plate", "small", "rice_mixed_main"): (400, 300, 550),
+    ("plate", "medium", "rice_mixed_main"): (550, 400, 700),
+    ("plate", "large", "rice_mixed_main"): (700, 550, 900),
+    ("bowl", "small", "rice_mixed_main"): (300, 250, 450),
+    ("bowl", "medium", "rice_mixed_main"): (450, 350, 600),
+    ("bowl", "large", "rice_mixed_main"): (600, 450, 750),
+
+    # Yogurt sides (raita, tzatziki, etc.)
+    ("bowl", "small", "yogurt_side"): (80, 50, 120),
+    ("bowl", "medium", "yogurt_side"): (120, 80, 180),
+    ("side", "portion", "yogurt_side"): (100, 60, 150),
+
+    # Curries and stews
+    ("bowl", "small", "curry"): (250, 200, 350),
+    ("bowl", "medium", "curry"): (350, 300, 500),
+    ("bowl", "large", "curry"): (500, 400, 650),
+
+    # Salads
+    ("plate", "small", "salad"): (150, 100, 250),
+    ("plate", "medium", "salad"): (250, 200, 350),
+    ("plate", "large", "salad"): (350, 250, 500),
+    ("bowl", "small", "salad"): (150, 100, 250),
+    ("bowl", "medium", "salad"): (250, 200, 350),
+    ("bowl", "large", "salad"): (350, 250, 500),
+}
+
+# Fill level multipliers
+FILL_LEVEL_MULTIPLIERS = {
+    "half": 0.6,
+    "level": 1.0,
+    "heaping": 1.2,
+    "default": 1.0,
+}
+
+# Category-based portion bounds (for sanity clamping - legacy)
 CATEGORY_BOUNDS = {
     "burger": (80, 250),       # cheeseburger to double/triple
     "fries": (50, 200),        # small to large
@@ -53,16 +117,21 @@ CATEGORY_BOUNDS = {
 }
 
 
-def _extract_brand_and_size(name: str, notes: str) -> tuple[Optional[str], Optional[str]]:
+def _extract_brand_and_size(name: str, notes: str, portion_label: str = "") -> tuple[Optional[str], Optional[str]]:
     """
-    Extract brand and size from ingredient name and notes.
+    Extract brand and size from ingredient name, notes, and portion_label.
+
+    Args:
+        name: Ingredient name
+        notes: Notes field (often contains brand like "McDonald's")
+        portion_label: Portion size label (like "large", "medium", "small")
 
     Returns:
         (brand, size) - both lowercase, or (None, None)
     """
     combined = f"{name} {notes}".lower()
 
-    # Brand detection
+    # Brand detection (primarily from notes field)
     brand = None
     if "mcdonald" in combined or "mcdonalds" in combined or "mcd" in combined:
         brand = "mcdonalds"
@@ -73,30 +142,50 @@ def _extract_brand_and_size(name: str, notes: str) -> tuple[Optional[str], Optio
     elif "kfc" in combined:
         brand = "kfc"
 
-    # Size detection
+    # Size detection - PREFER portion_label over notes/name
     size = None
-    if "small" in combined or "sm" in combined:
+    portion_lower = portion_label.lower() if portion_label else ""
+
+    # Check portion_label first (most reliable source)
+    if "small" in portion_lower or "sm" in portion_lower:
         size = "small"
-    elif "medium" in combined or "med" in combined or "m" in combined:
+    elif "medium" in portion_lower or "med" in portion_lower:
         size = "medium"
-    elif "large" in combined or "lg" in combined or "lrg" in combined:
+    elif "large" in portion_lower or "lg" in portion_lower or "lrg" in portion_lower:
         size = "large"
+    elif "grande" in portion_lower:  # Starbucks
+        size = "large"
+    elif "venti" in portion_lower:  # Starbucks
+        size = "large"
+    elif "tall" in portion_lower:  # Starbucks
+        size = "small"
+
+    # Fallback: check combined name+notes only if portion_label didn't have size
+    if not size:
+        if "small" in combined or "sm" in combined:
+            size = "small"
+        elif "medium" in combined or "med" in combined or " m " in combined:
+            size = "medium"
+        elif "large" in combined or "lg" in combined or "lrg" in combined:
+            size = "large"
 
     return brand, size
 
 
-def _brand_size_lookup(name: str, notes: str) -> Optional[float]:
+def _brand_size_lookup(name: str, notes: str, portion_label: str = "") -> Optional[float]:
     """
     Look up portion grams from brand+size cache.
 
     Args:
         name: Ingredient name (e.g., "cheeseburger", "potato fries", "cola")
-        notes: Notes field (e.g., "McDonald's medium")
+        notes: Notes field (e.g., "McDonald's")
+        portion_label: Portion size (e.g., "large", "medium", "small")
 
     Returns:
         Grams or None if no match
     """
-    brand, size = _extract_brand_and_size(name, notes)
+    brand, size = _extract_brand_and_size(name, notes, portion_label)
+    print(f"DEBUG: _brand_size_lookup(name='{name}', notes='{notes}', portion_label='{portion_label}') -> brand='{brand}', size='{size}'")
 
     if not brand:
         return None
@@ -109,36 +198,48 @@ def _brand_size_lookup(name: str, notes: str) -> Optional[float]:
         if "fries" in name_lower or "fry" in name_lower:
             key = (brand, "fries", size)
             if key in BRAND_SIZE_PORTIONS:
-                return BRAND_SIZE_PORTIONS[key]
+                grams = BRAND_SIZE_PORTIONS[key]
+                print(f"DEBUG: Brand+size match found! key={key} -> {grams}g")
+                return grams
+            else:
+                print(f"DEBUG: Brand+size key not in table: {key}")
 
         if "cola" in name_lower or "coke" in name_lower or "soda" in name_lower or "pop" in name_lower:
             key = (brand, "cola", size)
             if key in BRAND_SIZE_PORTIONS:
-                return BRAND_SIZE_PORTIONS[key]
+                grams = BRAND_SIZE_PORTIONS[key]
+                print(f"DEBUG: Brand+size match found! key={key} -> {grams}g")
+                return grams
+            else:
+                print(f"DEBUG: Brand+size key not in table: {key}")
 
     # Try brand+item without size
     for item_keyword in ["cheeseburger", "hamburger", "big mac", "quarter pounder", "mcdouble"]:
         if item_keyword.replace(" ", "") in name_lower.replace(" ", ""):
             key = (brand, item_keyword.replace(" ", ""))
             if key in BRAND_SIZE_PORTIONS:
-                return BRAND_SIZE_PORTIONS[key]
+                grams = BRAND_SIZE_PORTIONS[key]
+                print(f"DEBUG: Brand+item match found! key={key} -> {grams}g")
+                return grams
 
+    print(f"DEBUG: No brand+size match found for name='{name}', brand='{brand}', size='{size}'")
     return None
 
 
-def _category_heuristics(name: str, notes: str) -> Optional[float]:
+def _category_heuristics(name: str, notes: str, portion_label: str = "") -> Optional[float]:
     """
     Estimate grams using category-based heuristics.
 
     Args:
         name: Ingredient name
         notes: Notes field
+        portion_label: Portion size label
 
     Returns:
         Estimated grams or None
     """
     combined = f"{name} {notes}".lower()
-    _, size = _extract_brand_and_size(name, notes)
+    _, size = _extract_brand_and_size(name, notes, portion_label)
 
     # Burgers
     if any(kw in combined for kw in ["burger", "sandwich"]):
@@ -182,6 +283,194 @@ def _category_heuristics(name: str, notes: str) -> Optional[float]:
     return None
 
 
+def _extract_oz_from_label(portion_label: str) -> Optional[float]:
+    """
+    Extract ounces from portion_label like '14 oz', '16oz', '12 fl oz'.
+
+    Returns:
+        Ounces as float, or None if not found
+    """
+    if not portion_label:
+        return None
+
+    # Match patterns like "14 oz", "16oz", "12 fl oz"
+    match = re.search(r'(\d+(?:\.\d+)?)\s*(?:fl\s*)?oz', portion_label.lower())
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def _extract_scoops_from_label(portion_label: str) -> Optional[int]:
+    """
+    Extract scoop count from portion_label like '1 scoop', '2 scoops'.
+
+    Returns:
+        Number of scoops as int, or None if not found
+    """
+    if not portion_label:
+        return None
+
+    # Match patterns like "1 scoop", "2 scoops"
+    match = re.search(r'(\d+)\s*scoops?', portion_label.lower())
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _extract_tbsp_from_label(portion_label: str) -> Optional[int]:
+    """
+    Extract tablespoon count from portion_label like '2 tbsp', '1 tablespoon'.
+
+    Returns:
+        Number of tablespoons as int, or None if not found
+    """
+    if not portion_label:
+        return None
+
+    # Match patterns like "2 tbsp", "1 tablespoon", "3 tablespoons"
+    match = re.search(r'(\d+)\s*(?:tbsp|tablespoons?|tbs)', portion_label.lower())
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _get_density_for_ingredient(name: str) -> float:
+    """
+    Get density (g/mL) for an ingredient based on name.
+
+    Returns:
+        Density in g/mL
+    """
+    name_lower = name.lower()
+
+    # Check for exact matches first
+    for key in BEVERAGE_DENSITY:
+        if key in name_lower:
+            return BEVERAGE_DENSITY[key]
+
+    # Default to 1.0 g/mL (water)
+    return BEVERAGE_DENSITY["default"]
+
+
+def _get_scoop_size_for_ingredient(name: str) -> float:
+    """
+    Get scoop size (grams per scoop) for a powder ingredient.
+
+    Returns:
+        Grams per scoop
+    """
+    name_lower = name.lower()
+
+    # Check for exact matches
+    for key in SCOOP_SIZES:
+        if key in name_lower:
+            return SCOOP_SIZES[key]
+
+    # Default to 30g per scoop
+    return SCOOP_SIZES["default"]
+
+
+def _has_powder_sibling(items: List[Dict[str, Any]]) -> bool:
+    """
+    Check if any ingredient in the list is a protein powder.
+    Used to apply "headroom" reduction for shake/smoothie base liquids.
+
+    Returns:
+        True if powder present
+    """
+    for item in items:
+        name_lower = item.get("name", "").lower()
+        if any(kw in name_lower for kw in ["protein powder", "whey", "casein", "plant protein"]):
+            return True
+    return False
+
+
+def _infer_container_type(portion_label: str) -> Optional[str]:
+    """
+    Infer container type from portion_label text.
+
+    Returns:
+        Container type: "plate", "bowl", "glass", "side", or None
+    """
+    if not portion_label:
+        return None
+
+    label_lower = portion_label.lower()
+
+    if "plate" in label_lower:
+        return "plate"
+    elif "bowl" in label_lower:
+        return "bowl"
+    elif any(kw in label_lower for kw in ["glass", "cup", "oz", "ml"]):
+        return "glass"
+    elif "side" in label_lower:
+        return "side"
+
+    return None
+
+
+def _container_capacity_lookup(
+    name: str,
+    portion_label: str,
+    category: Optional[str] = None,
+    fill_level: str = "level"
+) -> Optional[float]:
+    """
+    Look up portion grams from container capacity tables.
+
+    Args:
+        name: Ingredient name
+        portion_label: Portion description (e.g., "large plate", "small bowl")
+        category: Food category (e.g., "rice_mixed_main", "yogurt_side")
+        fill_level: Fill level ("half", "level", "heaping")
+
+    Returns:
+        Grams or None if no match
+    """
+    if not category:
+        return None
+
+    # Infer container type from portion_label
+    container_type = _infer_container_type(portion_label)
+    if not container_type:
+        return None
+
+    # Extract size from portion_label
+    _, size = _extract_brand_and_size(name, "", portion_label)
+    if not size:
+        # Default to medium if no size specified but container type exists
+        size = "medium"
+
+    # Special handling for "side portion" labels
+    if "side" in portion_label.lower() and "portion" in portion_label.lower():
+        container_type = "side"
+        size = "portion"
+
+    # Lookup in capacity table
+    key = (container_type, size, category)
+    if key not in CONTAINER_CAPACITY:
+        return None
+
+    base_grams, clamp_min, clamp_max = CONTAINER_CAPACITY[key]
+
+    # Apply fill level multiplier
+    multiplier = FILL_LEVEL_MULTIPLIERS.get(fill_level, FILL_LEVEL_MULTIPLIERS["default"])
+    grams = base_grams * multiplier
+
+    # Clamp to category-specific bounds
+    clamped = False
+    if grams < clamp_min:
+        grams = clamp_min
+        clamped = True
+    elif grams > clamp_max:
+        grams = clamp_max
+        clamped = True
+
+    print(f"DEBUG: _container_capacity_lookup(name='{name}', portion_label='{portion_label}', category='{category}') -> container='{container_type}', size='{size}' → {grams}g (clamped={clamped})")
+
+    return grams
+
+
 def _clamp_by_category(name: str, grams: float) -> float:
     """
     Clamp grams to category bounds (prevents outliers like 500g fries).
@@ -202,7 +491,9 @@ def _clamp_by_category(name: str, grams: float) -> float:
     elif "fries" in name_lower or "fry" in name_lower:
         category = "fries"
     elif any(kw in name_lower for kw in ["cola", "soda", "pop", "drink", "juice", "tea", "coffee", "water", "latte"]):
-        category = "beverage"
+        # Exclude syrups, sauces, and condiments from beverage category
+        if not any(exclude in name_lower for exclude in ["syrup", "sauce", "ketchup", "mayo", "dressing", "condiment"]):
+            category = "beverage"
     elif "rice" in name_lower:
         category = "rice"
     elif "chicken" in name_lower and ("piece" in name_lower or "breast" in name_lower or "thigh" in name_lower):
@@ -270,15 +561,90 @@ def resolve_portions(items: List[Dict[str, Any]], usda_client=None) -> tuple[Lis
         resolved_grams = None
         resolution_source = None
 
-        # Combine portion_label and notes for size extraction
-        combined_context = f"{portion_label} {notes}".strip()
-
-        # 2) Brand+size lookup
-        resolved_grams = _brand_size_lookup(name, combined_context)
+        # 2) Brand+size lookup (pass portion_label separately!)
+        resolved_grams = _brand_size_lookup(name, notes, portion_label)
         if resolved_grams:
             resolution_source = "brand-size-lookup"
             metrics["brand_size"] += 1
             print(f"DEBUG: Portion resolver tier 2 (brand+size): '{name}' = {resolved_grams}g")
+
+        # 2.5) Scoop-based resolution for powders (protein powder, etc.)
+        if not resolved_grams:
+            scoops = _extract_scoops_from_label(portion_label)
+            if scoops:
+                scoop_size = _get_scoop_size_for_ingredient(name)
+                resolved_grams = scoops * scoop_size
+                resolution_source = "scoop-label"
+                metrics["brand_size"] += 1  # Count as deterministic like brand+size
+                print(f"DEBUG: Portion resolver tier 2.5 (scoop): '{name}' = {scoops} scoops × {scoop_size}g = {resolved_grams}g")
+
+        # 2.6) Ounce-based resolution for liquids (milk, water, etc.)
+        if not resolved_grams:
+            oz = _extract_oz_from_label(portion_label)
+            if oz:
+                # Check if powder is present in the ingredient list (for headroom)
+                has_powder = _has_powder_sibling(items)
+
+                # Apply headroom if this is a shake/smoothie base liquid with powder
+                name_lower = name.lower()
+                is_shake_base = any(kw in name_lower for kw in ["milk", "water", "juice", "base"])
+                notes_lower = notes.lower() if notes else ""
+                is_smoothie_context = "smoothie" in notes_lower or "shake" in notes_lower
+
+                if has_powder and is_shake_base and is_smoothie_context:
+                    # Apply headroom: 16oz → 14oz, 12oz → 10oz
+                    if oz >= 16:
+                        oz = oz - 2
+                        print(f"DEBUG: Applied -2oz headroom for shake base (powder present): {oz + 2}oz → {oz}oz")
+                    elif oz >= 12:
+                        oz = oz - 2
+                        print(f"DEBUG: Applied -2oz headroom for shake base (powder present): {oz + 2}oz → {oz}oz")
+
+                # Convert oz to mL (1 oz = 29.5735 mL)
+                ml = oz * 29.5735
+
+                # Get density for this ingredient
+                density = _get_density_for_ingredient(name)
+
+                # Convert mL to grams
+                resolved_grams = ml * density
+                resolution_source = "oz-label-density"
+                metrics["brand_size"] += 1  # Count as deterministic
+                print(f"DEBUG: Portion resolver tier 2.6 (oz+density): '{name}' = {oz}oz × {ml:.1f}mL × {density}g/mL = {resolved_grams:.1f}g")
+
+        # 2.7) Tablespoon-based resolution for syrups, sauces, oils
+        if not resolved_grams:
+            tbsp = _extract_tbsp_from_label(portion_label)
+            if tbsp:
+                # 1 tbsp = ~15 mL for most liquids/syrups
+                ml = tbsp * 15.0
+
+                # Get density for this ingredient
+                density = _get_density_for_ingredient(name)
+
+                # For thick syrups, use higher density
+                name_lower = name.lower()
+                if any(kw in name_lower for kw in ['syrup', 'honey', 'molasses']):
+                    density = 1.4  # Syrups are denser than water
+                elif any(kw in name_lower for kw in ['oil', 'butter']):
+                    density = 0.92  # Oils/fats are less dense
+
+                # Convert mL to grams
+                resolved_grams = ml * density
+                resolution_source = "tbsp-label-density"
+                metrics["brand_size"] += 1  # Count as deterministic
+                print(f"DEBUG: Portion resolver tier 2.7 (tbsp): '{name}' = {tbsp} tbsp × 15mL × {density}g/mL = {resolved_grams:.1f}g")
+
+        # 2.8) Container-capacity lookup (plates, bowls - universal across cuisines)
+        if not resolved_grams:
+            category = item.get("category")  # Will be set by canonicalization
+            fill_level = item.get("fill_level", "level")
+
+            resolved_grams = _container_capacity_lookup(name, portion_label, category, fill_level)
+            if resolved_grams:
+                resolution_source = "container-capacity"
+                metrics["brand_size"] += 1  # Count as deterministic
+                print(f"DEBUG: Portion resolver tier 2.8 (container-capacity): '{name}' = {resolved_grams}g")
 
         # 3) USDA foodPortions (TODO: implement when needed)
         # if not resolved_grams and usda_client:
@@ -286,9 +652,9 @@ def resolve_portions(items: List[Dict[str, Any]], usda_client=None) -> tuple[Lis
         #     resolution_source = "usda-portions"
         #     metrics["usda_portions"] += 1
 
-        # 4) Category heuristics (uses portion_label)
+        # 4) Category heuristics (pass portion_label separately!)
         if not resolved_grams:
-            resolved_grams = _category_heuristics(name, combined_context)
+            resolved_grams = _category_heuristics(name, notes, portion_label)
             if resolved_grams:
                 resolution_source = "category-heuristic"
                 metrics["category_heuristic"] += 1

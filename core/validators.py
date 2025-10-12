@@ -231,6 +231,91 @@ def compute_confidence(scaled_items: List[ScaledItem], validations: Dict[str, An
         return 0.1  # Lowest confidence on error
 
 
+# Category-based kcal/100g sanity bands
+CATEGORY_KCAL_BANDS = {
+    "rice_mixed_main": (150, 250),  # Biryani, pulao, fried rice
+    "yogurt_side": (60, 120),        # Raita, tzatziki
+    "curry": (80, 180),              # Curries and stews
+    "salad": (30, 150),              # Salads
+}
+
+
+def validate_category_sanity_bands(scaled_items: List[ScaledItem]) -> List[str]:
+    """
+    Validate that food categories fall within expected kcal/100g ranges.
+
+    Args:
+        scaled_items: List of scaled items with nutrition data
+
+    Returns:
+        List of warning strings
+    """
+    warnings = []
+
+    for item in scaled_items:
+        # Calculate kcal per 100g
+        grams = item.get("grams", 0)
+        kcal = item.get("kcal", 0)
+
+        if grams > 0:
+            kcal_per_100g = (kcal / grams) * 100
+
+            # Check category-specific bands
+            name = item.get("name", "").lower()
+
+            # Determine category from name
+            category = None
+            if any(kw in name for kw in ["biryani", "pulao", "fried rice", "paella"]):
+                category = "rice_mixed_main"
+            elif any(kw in name for kw in ["raita", "tzatziki"]):
+                category = "yogurt_side"
+            elif any(kw in name for kw in ["curry", "dal", "stew"]):
+                category = "curry"
+            elif "salad" in name:
+                category = "salad"
+
+            if category and category in CATEGORY_KCAL_BANDS:
+                min_kcal, max_kcal = CATEGORY_KCAL_BANDS[category]
+
+                if kcal_per_100g < min_kcal:
+                    warnings.append(f"{item.get('name')}: {kcal_per_100g:.0f} kcal/100g below expected range ({min_kcal}-{max_kcal})")
+                elif kcal_per_100g > max_kcal:
+                    warnings.append(f"{item.get('name')}: {kcal_per_100g:.0f} kcal/100g above expected range ({min_kcal}-{max_kcal})")
+
+    return warnings
+
+
+def validate_composition_consistency(ingredients_raw: List[Dict[str, Any]]) -> List[str]:
+    """
+    Validate that compound items are properly decomposed when component notes exist.
+
+    Warns if a compound category item (smoothie/shake/salad/sandwich) has component
+    notes but wasn't decomposed into separate ingredients.
+
+    Args:
+        ingredients_raw: Raw ingredients before USDA grounding (need notes field)
+
+    Returns:
+        List of warning strings
+    """
+    warnings = []
+    compound_keywords = ['smoothie', 'shake', 'protein shake', 'salad', 'sandwich', 'wrap', 'burrito', 'bowl']
+
+    for ingredient in ingredients_raw:
+        name_lower = ingredient.get('name', '').lower()
+        notes = ingredient.get('notes', '') or ''
+        notes_lower = notes.lower()
+
+        # Check if this is a compound item that should have been decomposed
+        is_compound = any(kw in name_lower for kw in compound_keywords)
+        has_component_notes = any(word in notes_lower for word in ['protein powder', 'whey', 'casein', 'base', 'milk', 'with'])
+
+        if is_compound and has_component_notes:
+            warnings.append(f"Compound item '{ingredient.get('name')}' with component notes ('{notes}') was not decomposed - may have inaccurate macros")
+
+    return warnings
+
+
 def run_all_validations(scaled_items: List[ScaledItem], dish: str = "") -> Dict[str, Any]:
     """
     Run all validation checks and compute confidence score.
@@ -247,12 +332,14 @@ def run_all_validations(scaled_items: List[ScaledItem], dish: str = "") -> Dict[
         four_four_nine = validate_4_4_9(scaled_items)
         portion_warnings = validate_portion_bounds(scaled_items)
         combo_sanity_warnings = validate_combo_sanity_caps(scaled_items, dish)
+        category_sanity_warnings = validate_category_sanity_bands(scaled_items)
 
         # Package validation results
         validations = {
             "four_four_nine": four_four_nine,
             "portion_warnings": portion_warnings,
-            "combo_sanity_warnings": combo_sanity_warnings
+            "combo_sanity_warnings": combo_sanity_warnings,
+            "category_sanity_warnings": category_sanity_warnings
         }
 
         # Compute confidence (include combo sanity in penalty calculation)

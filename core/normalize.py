@@ -26,6 +26,19 @@ NAME_ALIASES = {
     "chips": "fries",  # Only in fast-food context (McDonald's, etc.)
     "french fries": "fries",
     "potato fries": "fries",
+    # Protein powder variants
+    "whey protein": "protein powder (whey)",
+    "whey powder": "protein powder (whey)",
+    "protein shake powder": "protein powder (whey)",
+    "casein protein": "protein powder (casein)",
+    "plant protein": "protein powder (plant)",
+    "pea protein": "protein powder (plant)",
+    # Milk variants
+    "whole milk": "milk (whole)",
+    "2% milk": "milk (2%)",
+    "skim milk": "milk (skim)",
+    "nonfat milk": "milk (skim)",
+    "fat free milk": "milk (skim)",
 }
 
 # Negative checks: if these words appear, DOWN-RANK or reject certain matches
@@ -167,6 +180,37 @@ def canonicalize_portion_label(portion_label: Optional[str]) -> Optional[str]:
             label_lower = label_lower.replace(alias, canonical)
 
     return label_lower
+
+
+def categorize_food(name: str) -> Optional[str]:
+    """
+    Categorize food by type for portion resolution.
+
+    Args:
+        name: Ingredient name
+
+    Returns:
+        Category string or None
+    """
+    name_lower = name.lower()
+
+    # Rice-based mixed mains
+    if any(kw in name_lower for kw in ["biryani", "pulao", "pilaf", "fried rice", "nasi goreng", "paella"]):
+        return "rice_mixed_main"
+
+    # Yogurt sides
+    if any(kw in name_lower for kw in ["raita", "tzatziki", "yogurt dip"]):
+        return "yogurt_side"
+
+    # Curries and stews
+    if any(kw in name_lower for kw in ["curry", "dal", "daal", "stew", "chili"]):
+        return "curry"
+
+    # Salads
+    if "salad" in name_lower:
+        return "salad"
+
+    return None
 
 
 def canonicalize_name(name: str, brand: Optional[str] = None, category: Optional[str] = None) -> str:

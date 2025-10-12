@@ -22,6 +22,13 @@ def _passes_critical_nutrition(name_lower: str, per100g: Dict[str, float]) -> bo
     kcal = per100g.get("kcal", 0.0) or 0.0
     fat = per100g.get("fat_g", 0.0) or 0.0
     carb = per100g.get("carb_g", 0.0) or 0.0
+    protein = per100g.get("protein_g", 0.0) or 0.0
+
+    # Protein powder: should have high protein content
+    if any(k in name_lower for k in ("protein powder", "whey", "casein", "protein supplement")):
+        if protein < 50:
+            print(f"DEBUG: Failed protein powder check - protein powder but only {protein}g protein (expected ≥50g)")
+            return False
 
     # Beverages: diet/zero/unsweetened/no sugar
     if any(k in name_lower for k in ("diet", "zero", "sugar-free", "sugar free", "unsweetened", "no sugar")):

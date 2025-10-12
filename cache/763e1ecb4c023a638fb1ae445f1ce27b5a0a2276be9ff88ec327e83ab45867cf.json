@@ -1,0 +1,106 @@
+{
+  "key": "vision:gemini-2.5-flash-lite:b999141:image_hash=184d3c88c08f14814bf614db54f96ffd9c87d74d1cbb325c05f1ba7265b84326",
+  "value": {
+    "dish": "Chicken Biryani",
+    "portion_guess_g": 500.0,
+    "ingredients": [
+      {
+        "name": "chicken biryani",
+        "amount": null,
+        "unit": "g",
+        "source": "estimation",
+        "portion_label": "large plate",
+        "notes": null
+      },
+      {
+        "name": "raita",
+        "amount": null,
+        "unit": "g",
+        "source": "estimation",
+        "portion_label": "side portion",
+        "notes": null
+      }
+    ],
+    "critical_questions": [
+      {
+        "id": "biryani_protein",
+        "text": "Chicken bone-in or boneless?",
+        "options": [
+          "bone-in",
+          "boneless"
+        ],
+        "default": "bone-in",
+        "impact_score": 0.6,
+        "follow_up_prompt": null
+      },
+      {
+        "id": "ghee_used",
+        "text": "Cooked with ghee?",
+        "options": [
+          "yes",
+          "no"
+        ],
+        "default": "yes",
+        "impact_score": 0.5,
+        "follow_up_prompt": null
+      }
+    ],
+    "raw_model": {
+      "dish": "Chicken Biryani",
+      "portion_guess_g": 500,
+      "ingredients": [
+        {
+          "name": "chicken biryani",
+          "amount": null,
+          "unit": "g",
+          "source": "estimation",
+          "portion_label": "large plate",
+          "notes": null
+        },
+        {
+          "name": "raita",
+          "amount": null,
+          "unit": "g",
+          "source": "estimation",
+          "portion_label": "side portion",
+          "notes": null
+        }
+      ],
+      "critical_questions": [
+        {
+          "id": "biryani_protein",
+          "text": "Chicken bone-in or boneless?",
+          "options": [
+            "bone-in",
+            "boneless"
+          ],
+          "default": "bone-in",
+          "impact_score": 0.6
+        },
+        {
+          "id": "ghee_used",
+          "text": "Cooked with ghee?",
+          "options": [
+            "yes",
+            "no"
+          ],
+          "default": "yes",
+          "impact_score": 0.5
+        },
+        {
+          "id": "biryani_spice_level",
+          "text": "Spice level?",
+          "options": [
+            "mild",
+            "medium",
+            "spicy"
+          ],
+          "default": "medium",
+          "impact_score": 0.4
+        }
+      ]
+    }
+  },
+  "ttl": 259200,
+  "created_at": 1760035034.1991327
+}
