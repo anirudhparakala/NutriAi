@@ -177,7 +177,302 @@ Please retry the request and provide ONLY the JSON response.
         return None, 0
 
 
-def generate_final_calculation(chat_session: genai.ChatSession, available_tools: dict = None, vision_estimate: VisionEstimate = None, refinements: list = None) -> tuple[str, int]:
+def should_trigger_stage2(ingredients: List[Dict[str, Any]]) -> bool:
+    """
+    Determine if Stage-2 quantity verification should trigger.
+
+    Skip if all ingredients satisfy:
+    - Known brand + size label (small/medium/large), OR
+    - Single-serve beverage with portion_label
+
+    Otherwise trigger if:
+    - 2+ ingredients, OR
+    - Any ingredient missing portion_label
+
+    Args:
+        ingredients: List of ingredient dicts
+
+    Returns:
+        True if Stage-2 should trigger
+    """
+    # Known brands for fast-food/restaurant meals
+    KNOWN_BRANDS = {'mcdonalds', 'mcdonald', 'kfc', 'subway', 'starbucks', 'burger king',
+                    'dominos', 'pizza hut', 'taco bell', 'chipotle', 'wendys', 'arbys'}
+    SIZE_LABELS = {'small', 'medium', 'large', 'regular', 'grande', 'venti'}
+    SINGLE_SERVE_BEVERAGE_PORTIONS = {'can', 'bottle', 'small', 'medium', 'large', 'regular'}
+
+    # Check if all ingredients are branded+sized (skip Stage-2 for McDonald's meals)
+    all_branded_sized = True
+    for ing in ingredients:
+        notes = (ing.get('notes') or '').lower()
+        portion = (ing.get('portion_label') or '').lower()
+        name = (ing.get('name') or '').lower()
+
+        # Check if this ingredient is branded+sized
+        has_brand = any(brand in notes or brand in name for brand in KNOWN_BRANDS)
+        has_size = any(size in portion for size in SIZE_LABELS)
+
+        # Check if single-serve beverage
+        is_beverage = any(bev in name for bev in ['cola', 'soda', 'coffee', 'tea', 'juice', 'water', 'drink', 'shake', 'smoothie'])
+        has_single_serve = any(portion_type in portion for portion_type in SINGLE_SERVE_BEVERAGE_PORTIONS)
+
+        is_branded_sized = (has_brand and has_size) or (is_beverage and has_single_serve and portion)
+
+        if not is_branded_sized:
+            all_branded_sized = False
+            break
+
+    if all_branded_sized and len(ingredients) > 0:
+        print(f"DEBUG: Skipping Stage-2 (all ingredients are branded+sized)")
+        return False
+
+    # Normal trigger conditions
+    if len(ingredients) >= 2:
+        return True
+
+    # Check for missing portion_labels
+    for ing in ingredients:
+        if not ing.get('portion_label'):
+            return True
+
+    return False
+
+
+def generate_stage2_question(ingredients: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Generate Stage-2 quantity confirmation question.
+
+    Args:
+        ingredients: List of ingredient dicts with portion_label estimates
+
+    Returns:
+        Question dict with id, text, options, follow_up_prompt, and checksum
+    """
+    import hashlib
+
+    # Build summary of current estimates
+    portions_summary = []
+    for ing in ingredients:
+        name = ing.get('name', 'unknown')
+        portion = ing.get('portion_label', 'unknown amount')
+        portions_summary.append(f"{portion} {name}")
+
+    question_text = f"I estimated: {', '.join(portions_summary)}. Does this look right?"
+
+    # Create checksum from ingredient names to detect stale answers
+    ingredient_signature = json.dumps([ing.get('name', '') for ing in ingredients], sort_keys=True)
+    checksum = hashlib.md5(ingredient_signature.encode()).hexdigest()[:8]
+
+    return {
+        "id": "qty_confirm",
+        "text": question_text,
+        "options": ["Looks right", "I want to adjust"],
+        "default": "Looks right",
+        "impact_score": 0.3,
+        "follow_up_prompt": "Use 'name amount unit', e.g., 'rice 2 cups; dal 0.5 cup; ghee 1 tbsp'",
+        "checksum": checksum,
+        "ingredients_snapshot": ingredients  # For validation
+    }
+
+
+def apply_stage2_adjustments(ingredients: List[Dict[str, Any]], stage2_answer: dict, chat_session: genai.ChatSession, available_tools: dict) -> dict:
+    """
+    Apply Stage-2 quantity adjustments to ingredients.
+
+    Args:
+        ingredients: List of ingredient dicts
+        stage2_answer: Dict with user's response and checksum (e.g., {"qty_confirm": "rice 2 cups", "checksum": "abc123"})
+        chat_session: Active chat session
+        available_tools: Dict of available tools
+
+    Returns:
+        Dict with {"ok": bool, "ingredients": list, "applied_count": int, "message": str, "match_map": dict}
+    """
+    import re
+    import hashlib
+
+    answer_value = stage2_answer.get("qty_confirm", "").strip()
+    answer_checksum = stage2_answer.get("checksum", "")
+
+    # Validate checksum to prevent stale answers
+    ingredient_signature = json.dumps([ing.get('name', '') for ing in ingredients], sort_keys=True)
+    current_checksum = hashlib.md5(ingredient_signature.encode()).hexdigest()[:8]
+
+    if answer_checksum and answer_checksum != current_checksum:
+        print(f"ERROR: Stage-2 checksum mismatch (stale answer)")
+        print(f"METRICS: {json.dumps({'event': 'qa_quantity_stale', 'ok': False})}")
+        return {
+            "ok": False,
+            "ingredients": ingredients,
+            "applied_count": 0,
+            "message": "The ingredient list changed. Please review the portions again.",
+            "match_map": {}
+        }
+
+    # If user said "Looks right", no changes needed
+    if answer_value.lower() in ["looks right", "yes", "correct", "good"]:
+        print(f"DEBUG: Stage-2 accepted as-is")
+        print(f"METRICS: {json.dumps({'event': 'qa_quantity_skip', 'reason': 'user_accepted'})}")
+        return {
+            "ok": True,
+            "ingredients": ingredients,
+            "applied_count": 0,
+            "message": "Portions confirmed",
+            "match_map": {}
+        }
+
+    # First try regex parsing for common patterns
+    adjustments = []
+    match_map = {}
+    parse_method = "regex"
+
+    # Support both formats:
+    # Pattern 1: "milk 22 oz" - <name> <number> <unit>
+    # Pattern 2: "22 oz milk" - <number> <unit> <name>
+
+    # Try pattern 2 first (more common user input: "22 oz milk")
+    pattern2 = r'(\d+(?:\.\d+)?)\s*([a-zA-Z]+)\s+([a-zA-Z\s]+?)(?:[;,]|$)'
+    matches_p2 = re.findall(pattern2, answer_value)
+
+    if matches_p2:
+        print(f"DEBUG: Stage-2 regex (amount-first) found {len(matches_p2)} matches")
+        for match in matches_p2:
+            amount, unit, name_part = match
+            name_part = name_part.strip()
+            new_portion_label = f"{amount} {unit}"
+            adjustments.append({"name": name_part, "new_portion_label": new_portion_label})
+    else:
+        # Try pattern 1: "milk 22 oz"
+        pattern1 = r'([a-zA-Z\s]+?)\s+(\d+(?:\.\d+)?)\s*([a-zA-Z]+)'
+        matches_p1 = re.findall(pattern1, answer_value)
+        if matches_p1:
+            print(f"DEBUG: Stage-2 regex (name-first) found {len(matches_p1)} matches")
+            for match in matches_p1:
+                name_part, amount, unit = match
+                name_part = name_part.strip()
+                new_portion_label = f"{amount} {unit}"
+                adjustments.append({"name": name_part, "new_portion_label": new_portion_label})
+        else:
+            # Fallback to LLM parsing
+            parse_method = "llm"
+            adjustment_prompt = f"""
+User wants to adjust portion quantities. Original estimates:
+{json.dumps([{'name': ing.get('name'), 'portion_label': ing.get('portion_label')} for ing in ingredients], indent=2)}
+
+User's adjustments: "{answer_value}"
+
+Parse the user's adjustments and return updated portion_label values. Return JSON only:
+
+{{
+  "adjustments": [
+    {{"name": "ingredient_name", "new_portion_label": "2 cups"}}
+  ]
+}}
+
+CRITICAL: Only include items the user mentioned. Accept grams/mL if user specified them, otherwise use human units (cups, tbsp, pieces, slices).
+"""
+
+            try:
+                response_text, tool_calls = run_with_tools(chat_session, available_tools, adjustment_prompt)
+                response_data = json.loads(response_text)
+                adjustments = response_data.get('adjustments', [])
+                print(f"DEBUG: Stage-2 LLM parse found {len(adjustments)} adjustments")
+            except Exception as e:
+                print(f"ERROR: Failed to parse Stage-2 adjustments with LLM: {e}")
+                print(f"METRICS: {json.dumps({'event': 'qa_quantity_parse', 'method': 'llm', 'ok': False, 'items': 0})}")
+                return {
+                    "ok": False,
+                    "ingredients": ingredients,
+                    "applied_count": 0,
+                    "message": "I couldn't understand the edits. Try 'rice 2 cups; dal 0.5 cup'",
+                    "match_map": {}
+                }
+
+    # Apply adjustments with tightened name matching
+    from .normalize import normalize_for_matching
+    changed_count = 0
+
+    for adj in adjustments:
+        adj_name = adj.get('name', '')
+        adj_name_normalized = normalize_for_matching(adj_name)
+        new_portion = adj.get('new_portion_label', '')
+
+        matched = False
+        for ing in ingredients:
+            ing_name = ing.get('name', '')
+            ing_name_normalized = normalize_for_matching(ing_name)
+
+            # Tightened matching: require head-token equality or significant overlap
+            if _names_match(adj_name_normalized, ing_name_normalized):
+                old_portion = ing.get('portion_label', '')
+                ing['portion_label'] = new_portion
+                ing['source'] = 'user'  # Mark as user-provided
+                changed_count += 1
+                match_map[adj_name] = ing_name
+                print(f"DEBUG: Stage-2 adjusted '{ing_name}': '{old_portion}' → '{new_portion}'")
+                matched = True
+                break
+
+        if not matched:
+            print(f"WARNING: Stage-2 could not match adjustment '{adj_name}' to any ingredient")
+
+    parse_ok = changed_count > 0
+    print(f"METRICS: {json.dumps({'event': 'qa_quantity_parse', 'method': parse_method, 'ok': parse_ok, 'items': len(adjustments)})}")
+    print(f"METRICS: {json.dumps({'event': 'qa_quantity_changed', 'changed': changed_count, 'total': len(ingredients)})}")
+    print(f"METRICS: {json.dumps({'event': 'qa_quantity_match_map', 'map': match_map})}")
+
+    if changed_count == 0:
+        return {
+            "ok": False,
+            "ingredients": ingredients,
+            "applied_count": 0,
+            "message": "I couldn't match your changes to the ingredients. Try using the exact ingredient names.",
+            "match_map": match_map
+        }
+
+    return {
+        "ok": True,
+        "ingredients": ingredients,
+        "applied_count": changed_count,
+        "message": f"Updated {changed_count} ingredient(s)",
+        "match_map": match_map
+    }
+
+
+def _names_match(name1_normalized: str, name2_normalized: str) -> bool:
+    """
+    Tightened name matching using head-token equality.
+
+    Args:
+        name1_normalized: First normalized name (tokens)
+        name2_normalized: Second normalized name (tokens)
+
+    Returns:
+        True if names match with sufficient confidence
+    """
+    tokens1 = set(name1_normalized.split())
+    tokens2 = set(name2_normalized.split())
+
+    if not tokens1 or not tokens2:
+        return False
+
+    # Get head tokens (first meaningful token)
+    head1 = name1_normalized.split()[0]
+    head2 = name2_normalized.split()[0]
+
+    # Require head token equality
+    if head1 == head2:
+        return True
+
+    # Or require significant token overlap (at least 1 common token and one must be the head)
+    overlap = tokens1 & tokens2
+    if overlap and (head1 in overlap or head2 in overlap):
+        return True
+
+    return False
+
+
+def generate_final_calculation(chat_session: genai.ChatSession, available_tools: dict = None, vision_estimate: VisionEstimate = None, refinements: list = None, stage2_answer: dict = None) -> tuple[str, int]:
     """
     Generates the final nutritional breakdown using deterministic USDA pipeline.
     LLM is only used for explanations, not macro calculations.
@@ -213,11 +508,17 @@ def generate_final_calculation(chat_session: genai.ChatSession, available_tools:
         # Collect assumptions from refinements
         assumptions = []
 
-        # Apply refinements - Trust the LLM's output completely
-        # The LLM is given full context (original ingredients + questions + answers)
-        # and is smart enough to return the correct updated ingredient list
+        # Apply refinements using ID-based merge logic
         if refinements:
             print(f"DEBUG: Applying {len(refinements)} refinements")
+
+            # Build ingredient map by ID for efficient lookups
+            ingredient_map = {}
+            for ing in ingredients:
+                ing_id = ing.get('id')
+                if ing_id:
+                    ingredient_map[ing_id] = ing
+
             for refinement in refinements:
                 # Collect assumptions
                 if hasattr(refinement, 'updated_assumptions') and refinement.updated_assumptions:
@@ -228,80 +529,153 @@ def generate_final_calculation(chat_session: genai.ChatSession, available_tools:
                             assumptions.append(assumption)
 
                 if hasattr(refinement, 'updated_ingredients') and refinement.updated_ingredients:
-                    updated_count = len(refinement.updated_ingredients)
-                    original_count = len(ingredients)
+                    # Convert to dicts
+                    updated_dicts = []
+                    for updated_ingredient in refinement.updated_ingredients:
+                        if hasattr(updated_ingredient, 'model_dump'):
+                            ingredient_dict = updated_ingredient.model_dump()
+                        elif isinstance(updated_ingredient, dict):
+                            ingredient_dict = updated_ingredient.copy()
+                        else:
+                            ingredient_dict = {
+                                "name": updated_ingredient.name if hasattr(updated_ingredient, 'name') else '',
+                                "amount": updated_ingredient.amount if hasattr(updated_ingredient, 'amount') else None
+                            }
+                        updated_dicts.append(ingredient_dict)
 
-                    print(f"DEBUG: Refinement has {updated_count} ingredients, original had {original_count}")
+                    # ID-based merge: Remove parents, add/update children
+                    parents_to_remove = set()
+                    items_to_add = []
 
-                    # If LLM returned ALL ingredients, it's a complete replacement (handles corrections)
-                    # If LLM returned fewer, it's a partial update (handles additions/specific changes)
-                    if updated_count >= original_count:
-                        print(f"DEBUG: Complete replacement - LLM provided full updated list")
-                        ingredients = []
-                        for updated_ingredient in refinement.updated_ingredients:
-                            # Preserve ALL fields from refinement (portion_label, notes, source, etc.)
-                            if hasattr(updated_ingredient, 'model_dump'):
-                                ingredient_dict = updated_ingredient.model_dump()
-                            elif isinstance(updated_ingredient, dict):
-                                ingredient_dict = updated_ingredient.copy()
-                            else:
-                                # Fallback for unexpected types
-                                ingredient_dict = {
-                                    "name": updated_ingredient.name if hasattr(updated_ingredient, 'name') else '',
-                                    "amount": updated_ingredient.amount if hasattr(updated_ingredient, 'amount') else None
-                                }
+                    for ing_dict in updated_dicts:
+                        parent_id = ing_dict.get('parent_id')
+                        ing_id = ing_dict.get('id')
 
-                            ingredients.append(ingredient_dict)
-                            # Log with all important fields for debugging
-                            portion_label = ingredient_dict.get('portion_label', '')
-                            notes = ingredient_dict.get('notes', '')
-                            amount = ingredient_dict.get('amount', 'None')
-                            print(f"DEBUG: Ingredient merged → name='{ingredient_dict.get('name')}', portion_label='{portion_label}', notes='{notes}', amount={amount}g")
-                    else:
-                        print(f"DEBUG: Partial update - merging specific changes")
-                        for updated_ingredient in refinement.updated_ingredients:
-                            # Preserve ALL fields from refinement
-                            if hasattr(updated_ingredient, 'model_dump'):
-                                new_ingredient_dict = updated_ingredient.model_dump()
-                            elif isinstance(updated_ingredient, dict):
-                                new_ingredient_dict = updated_ingredient.copy()
-                            else:
-                                new_ingredient_dict = {
-                                    "name": updated_ingredient.name if hasattr(updated_ingredient, 'name') else '',
-                                    "amount": updated_ingredient.amount if hasattr(updated_ingredient, 'amount') else None
-                                }
+                        if parent_id:
+                            # Mark parent for removal
+                            parents_to_remove.add(parent_id)
+                            print(f"DEBUG: Item '{ing_dict.get('name')}' replaces parent_id={parent_id}")
 
-                            name = new_ingredient_dict.get('name', '')
-                            name_lower = name.lower()
-                            found = False
+                        if ing_id and ing_id in ingredient_map:
+                            # Update existing item
+                            ingredient_map[ing_id].update(ing_dict)
+                            print(f"DEBUG: Updated existing → id={ing_id}, name='{ing_dict.get('name')}'")
+                        else:
+                            # New item
+                            items_to_add.append(ing_dict)
+                            print(f"DEBUG: New item → name='{ing_dict.get('name')}'")
 
-                            # Find and replace by fuzzy matching (handles variants like "cola" -> "cola (diet)")
-                            for i, existing in enumerate(ingredients):
-                                existing_name = existing.get('name', '').lower()
+                    # Remove parents
+                    for parent_id in parents_to_remove:
+                        if parent_id in ingredient_map:
+                            removed = ingredient_map.pop(parent_id)
+                            print(f"DEBUG: Removed parent → id={parent_id}, name='{removed.get('name')}'")
 
-                                # Exact match
-                                if existing_name == name_lower:
-                                    ingredients[i] = new_ingredient_dict
-                                    print(f"DEBUG:   - Replaced (exact): name='{name}', portion_label='{new_ingredient_dict.get('portion_label')}', notes='{new_ingredient_dict.get('notes')}'")
-                                    found = True
-                                    break
+                    # Rebuild ingredient list
+                    ingredients = list(ingredient_map.values()) + items_to_add
 
-                                # Variant match: check if one is a variant of the other
-                                # E.g., "cola" matches "cola (diet)", "milk" matches "milk (2%)"
-                                existing_base = existing_name.split('(')[0].strip()
-                                new_base = name_lower.split('(')[0].strip()
+                    # Rebuild map for next iteration
+                    ingredient_map = {ing.get('id'): ing for ing in ingredients if ing.get('id')}
 
-                                if existing_base == new_base:
-                                    # Same base ingredient, replace with the more specific variant
-                                    ingredients[i] = new_ingredient_dict
-                                    print(f"DEBUG:   - Replaced (variant): '{existing.get('name')}' with name='{name}', portion_label='{new_ingredient_dict.get('portion_label')}', notes='{new_ingredient_dict.get('notes')}'")
-                                    found = True
-                                    break
+                    print(f"DEBUG: After refinement: {len(ingredients)} ingredients, removed {len(parents_to_remove)} parents")
 
-                            if not found:
-                                # New ingredient, append it
-                                ingredients.append(new_ingredient_dict)
-                                print(f"DEBUG:   - Added new: name='{name}', portion_label='{new_ingredient_dict.get('portion_label')}', notes='{new_ingredient_dict.get('notes')}'")
+        # Step 1.4: Canonical dedup safety net (prevents double-counting if LLM didn't set parent_id)
+        from .normalize import canonicalize_name
+        COMPOSITE_TERMS = {'smoothie', 'shake', 'bowl', 'salad', 'soup', 'biryani', 'wrap', 'pizza', 'plate', 'mix'}
+
+        canonical_groups = {}
+        composite_items = []
+        dropped_composites = 0
+        deduped = 0
+
+        for ing in ingredients:
+            name = ing.get('name', '')
+            canonical = canonicalize_name(name)
+            name_lower = name.lower()
+
+            # Check if this is a composite term
+            is_composite = any(term in name_lower for term in COMPOSITE_TERMS)
+
+            if canonical not in canonical_groups:
+                canonical_groups[canonical] = []
+            canonical_groups[canonical].append((ing, is_composite))
+
+        # For each canonical group, keep only specific ingredients (not composites)
+        filtered_ingredients = []
+        for canonical, items in canonical_groups.items():
+            if len(items) == 1:
+                # No conflict, keep it
+                filtered_ingredients.append(items[0][0])
+            else:
+                # Multiple items with same canonical name - keep specific over composite
+                has_composite = any(is_comp for _, is_comp in items)
+                has_specific = any(not is_comp for _, is_comp in items)
+
+                if has_composite and has_specific:
+                    # Keep only specific items, drop composites
+                    for ing, is_comp in items:
+                        if not is_comp:
+                            filtered_ingredients.append(ing)
+                        else:
+                            dropped_composites += 1
+                            print(f"DEBUG: Dedup safety net dropped composite '{ing.get('name')}'")
+                else:
+                    # All composite or all specific - keep all
+                    for ing, _ in items:
+                        filtered_ingredients.append(ing)
+                    if len(items) > 1:
+                        deduped += len(items) - 1
+
+        ingredients = filtered_ingredients
+        print(f"METRICS: {json.dumps({'event': 'merge_result', 'count': len(ingredients), 'dropped_composites': dropped_composites, 'deduped': deduped})}")
+
+        # Guardrail: Check if any parent_id still exists in the list
+        ing_ids = {ing.get('id') for ing in ingredients if ing.get('id')}
+        for ing in ingredients:
+            parent_id = ing.get('parent_id')
+            if parent_id and parent_id in ing_ids:
+                print(f"WARN: Ingredient '{ing.get('name')}' has parent_id='{parent_id}' but parent still exists - this shouldn't happen")
+
+        # Step 1.5: Check if Stage-2 quantity verification should trigger
+        if should_trigger_stage2(ingredients):
+            # Check if we've already received a Stage-2 answer
+            if stage2_answer is None:
+                # Generate Stage-2 question and return early
+                stage2_question = generate_stage2_question(ingredients)
+                print(f"DEBUG: Stage-2 triggered with question: {stage2_question['text']}")
+                print(f"METRICS: {json.dumps({'event': 'qa_quantity_shown', 'count': len(ingredients)})}")
+
+                # Remove non-serializable snapshot before JSON encoding
+                stage2_q_clean = {k: v for k, v in stage2_question.items() if k != 'ingredients_snapshot'}
+
+                # Return special response indicating Stage-2 question pending
+                return json.dumps({
+                    "stage2_question": stage2_q_clean
+                }), tool_calls_count
+            else:
+                # Apply Stage-2 adjustments
+                print(f"DEBUG: Applying Stage-2 adjustments: {stage2_answer}")
+                result = apply_stage2_adjustments(ingredients, stage2_answer, chat_session, available_tools)
+                tool_calls_count += 1  # Count the LLM call for parsing adjustments
+
+                # Check if adjustment succeeded
+                if not result["ok"]:
+                    # Return error, ask user to try again
+                    print(f"ERROR: Stage-2 adjustment failed: {result['message']}")
+                    # Generate new question without ingredients_snapshot (causes serialization issues)
+                    stage2_q = generate_stage2_question(ingredients)
+                    # Remove non-serializable snapshot before JSON encoding
+                    stage2_q_clean = {k: v for k, v in stage2_q.items() if k != 'ingredients_snapshot'}
+                    return json.dumps({
+                        "stage2_error": result["message"],
+                        "stage2_question": stage2_q_clean
+                    }), tool_calls_count
+
+                # Success - use updated ingredients
+                ingredients = result["ingredients"]
+                print(f"DEBUG: Stage-2 applied {result['applied_count']} changes: {result['match_map']}")
+        else:
+            print(f"DEBUG: Skipping Stage-2 (single ingredient with portion_label)")
 
         # Step 2: Canonicalize names (normalize aliases, portion labels) and categorize
         from .normalize import canonicalize_name, canonicalize_portion_label, categorize_food

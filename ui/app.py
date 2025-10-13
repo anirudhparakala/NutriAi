@@ -416,15 +416,131 @@ def main():
 
             # THEN: Generate final calculation with all refinements
             with st.spinner("Calculating final nutrition breakdown..."):
+                # Pass Stage-2 answer if available
+                stage2_answer = st.session_state.get('stage2_answer')
+
                 final_response, final_tool_calls = qa_manager.generate_final_calculation(
                     st.session_state.get('conversation_chat', conversation_chat),
                     available_tools,
                     vision_estimate=st.session_state.get('vision_estimate'),
-                    refinements=st.session_state.get('refinements', [])
+                    refinements=st.session_state.get('refinements', []),
+                    stage2_answer=stage2_answer
                 )
 
                 # Track tool calls
                 st.session_state.tool_calls_count = st.session_state.get("tool_calls_count", 0) + final_tool_calls
+
+                # Check if response is a Stage-2 question
+                try:
+                    response_data = json.loads(final_response)
+                    if "stage2_question" in response_data:
+                        # Store Stage-2 question and go to Stage-2 QA mode
+                        st.session_state.stage2_question = response_data["stage2_question"]
+                        st.session_state.analysis_stage = "stage2_qa"
+                        st.rerun()
+                        return  # Don't continue to results
+                except Exception as e:
+                    # Not Stage-2 JSON, continue to normal results
+                    pass
+
+                # Normal response - store and show results
+                st.session_state.final_analysis = final_response
+                st.session_state.analysis_stage = "results"
+                st.rerun()
+
+    # Stage-2: Quantity verification
+    if st.session_state.analysis_stage == "stage2_qa":
+        st.markdown("### 📏 Portion Confirmation")
+
+        # Show error banner if there was a parsing issue
+        stage2_error = st.session_state.get('stage2_error')
+        if stage2_error:
+            st.warning(f"⚠️ {stage2_error}", icon="⚠️")
+            # Clear error after showing
+            st.session_state.stage2_error = None
+
+        stage2_q = st.session_state.get('stage2_question', {})
+        question_text = stage2_q.get('text', 'Confirm portions?')
+        options = stage2_q.get('options', ['Looks right', 'I want to adjust'])
+        follow_up = stage2_q.get('follow_up_prompt', 'Use "name amount unit", e.g., "rice 2 cups; dal 0.5 cup; ghee 1 tbsp"')
+        checksum = stage2_q.get('checksum', '')
+
+        st.markdown(f"**{question_text}**")
+
+        # Radio button for quick response
+        selected_option = st.radio(
+            "Your response:",
+            options,
+            key="stage2_radio",
+            label_visibility="collapsed"
+        )
+
+        # If user wants to adjust, show text area with hint
+        adjustment_text = ""
+        if selected_option == "I want to adjust":
+            st.caption(follow_up)
+            adjustment_text = st.text_area(
+                "Your adjustments:",
+                placeholder="rice 2 cups; dal 0.5 cup",
+                key="stage2_adjustment",
+                height=80,
+                label_visibility="collapsed"
+            )
+
+        # Submit button
+        if st.button("✅ Confirm Portions", type="primary"):
+            # Store the answer with checksum
+            if selected_option == "I want to adjust" and adjustment_text:
+                st.session_state.stage2_answer = {
+                    "qty_confirm": adjustment_text,
+                    "checksum": checksum
+                }
+            else:
+                st.session_state.stage2_answer = {
+                    "qty_confirm": selected_option,
+                    "checksum": checksum
+                }
+
+            # Directly trigger final calculation with the Stage-2 answer
+            with st.spinner("Calculating final nutrition breakdown..."):
+                conversation_chat = st.session_state.get('conversation_chat')
+                stage2_answer = st.session_state.stage2_answer
+
+                final_response, final_tool_calls = qa_manager.generate_final_calculation(
+                    conversation_chat,
+                    available_tools,
+                    vision_estimate=st.session_state.get('vision_estimate'),
+                    refinements=st.session_state.get('refinements', []),
+                    stage2_answer=stage2_answer
+                )
+
+                # Track tool calls
+                st.session_state.tool_calls_count = st.session_state.get("tool_calls_count", 0) + final_tool_calls
+
+                # Check if there was a Stage-2 error (need to stay on this screen)
+                try:
+                    response_data = json.loads(final_response)
+                    if "stage2_error" in response_data:
+                        # Store error and re-show the form
+                        st.session_state.stage2_error = response_data["stage2_error"]
+                        st.session_state.stage2_question = response_data.get("stage2_question", stage2_q)
+                        # Stay on stage2_qa, don't change stage
+                        st.rerun()
+                        return
+
+                    # Check if this is a Stage-2 question (shouldn't happen here, but be safe)
+                    if "stage2_question" in response_data:
+                        st.session_state.stage2_question = response_data["stage2_question"]
+                        # Stay on stage2_qa
+                        st.rerun()
+                        return
+
+                except Exception as e:
+                    # Log parse error for debugging
+                    print(f"DEBUG: Could not parse response as JSON: {e}")
+                    pass
+
+                # Success - store response and go to results
                 st.session_state.final_analysis = final_response
                 st.session_state.analysis_stage = "results"
                 st.rerun()

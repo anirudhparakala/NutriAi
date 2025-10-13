@@ -117,27 +117,28 @@ When ANY answer implies added components or preparation details (e.g., "protein_
 **Decomposition rules (STRICT):**
 1. **DELETE** the original composite item completely from updated_ingredients
 2. **ADD** separate ingredient entries for each confirmed component
-3. **DO NOT** keep both composite AND components - this double-counts calories
-4. Each component gets its own row with portion_label (NOT grams unless user stated exact weight)
+3. **Set parent_id** on each child ingredient to the composite item's id (so the system knows what was replaced)
+4. **DO NOT** keep both composite AND components - this double-counts calories
+5. Each component gets its own row with portion_label (NOT grams unless user stated exact weight)
 
 **If confidence is low** for a composite dish (smoothie/shake/rice-mix/salad/pasta/bowl), prefer componentized output over a single catch-all item
 
 **Decomposition Examples:**
 
-Vision returned: "chocolate smoothie"
+Vision returned: [{"id": "ing_1", "name": "chocolate smoothie", ...}]
 User answers: {"smoothie_base": "whole milk", "smoothie_protein_powder": "yes"}
 
 ✅ CORRECT:
 ```json
 {
   "updated_ingredients": [
-    {"name": "milk (whole)", "amount": null, "unit": "g", "source": "estimation", "portion_label": "1 cup", "notes": null},
-    {"name": "protein powder (whey)", "amount": null, "unit": "g", "source": "estimation", "portion_label": "1 scoop", "notes": null},
-    {"name": "chocolate syrup", "amount": null, "unit": "g", "source": "estimation", "portion_label": "2 tbsp", "notes": null}
+    {"id": "ing_1_child_1", "name": "milk (whole)", "amount": null, "unit": "g", "source": "estimation", "portion_label": "1 cup", "notes": null, "parent_id": "ing_1"},
+    {"id": "ing_1_child_2", "name": "protein powder (whey)", "amount": null, "unit": "g", "source": "estimation", "portion_label": "1 scoop", "notes": null, "parent_id": "ing_1"},
+    {"id": "ing_1_child_3", "name": "chocolate syrup", "amount": null, "unit": "g", "source": "estimation", "portion_label": "2 tbsp", "notes": null, "parent_id": "ing_1"}
   ]
 }
 ```
-Only 3 separate components. NO "chocolate smoothie" item.
+Only 3 separate components. NO "chocolate smoothie" item. Each child has parent_id="ing_1" to mark what they replaced.
 
 ❌ WRONG (keeping composite):
 ```json
@@ -232,5 +233,41 @@ Protein shake; user provided exact weights: "60g protein powder, 300ml almond mi
   ]
 }
 
+
+---
+
+**STAGE-2: Quantity Verification (when triggered)**
+
+This stage runs ONLY if:
+- len(ingredients) ≥ 2, OR
+- Any ingredient has missing/low-confidence portion_label, OR
+- Portion resolver would use heuristic/unresolved tier
+
+**Your task:** Present current portion estimates in human-friendly units and ask user to confirm/adjust.
+
+**Input format:**
+```json
+{
+  "ingredients": [
+    {"id": "ing_1", "name": "basmati rice (cooked)", "portion_label": "1.5 cups"},
+    {"id": "ing_2", "name": "dal (yellow)", "portion_label": "1 cup"},
+    {"id": "ing_3", "name": "ghee", "portion_label": "2 tbsp"}
+  ]
+}
+```
+
+**Output format (JSON only, no prose):**
+```json
+{
+  "updated_ingredients": [
+    {"id": "ing_1", "name": "basmati rice (cooked)", "portion_label": "2 cups", "notes": null},
+    {"id": "ing_2", "name": "dal (yellow)", "portion_label": "1 cup", "notes": null},
+    {"id": "ing_3", "name": "ghee", "portion_label": "1 tbsp", "notes": null}
+  ],
+  "question": "I estimated: 1.5 cups rice, 1 cup dal, 2 tbsp ghee. Does this look right, or would you like to adjust any amounts?"
+}
+```
+
+**Stage-2 quantity verification is handled by code, not LLM.** The system will programmatically ask users to confirm portions in human-friendly units (cups, pieces, tbsp, etc.).
 
 —END—

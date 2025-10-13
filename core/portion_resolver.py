@@ -283,6 +283,56 @@ def _category_heuristics(name: str, notes: str, portion_label: str = "") -> Opti
     return None
 
 
+def _extract_grams_from_label(portion_label: str) -> Optional[float]:
+    """
+    Extract grams from portion_label like '300g', '250 grams', '1.5kg'.
+
+    Returns:
+        Grams as float, or None if not found
+    """
+    if not portion_label:
+        return None
+
+    label_lower = portion_label.lower()
+
+    # Match kg first (convert to grams)
+    kg_match = re.search(r'(\d+(?:\.\d+)?)\s*kg', label_lower)
+    if kg_match:
+        return float(kg_match.group(1)) * 1000.0
+
+    # Match grams
+    g_match = re.search(r'(\d+(?:\.\d+)?)\s*g(?:rams?)?(?:\s|$)', label_lower)
+    if g_match:
+        return float(g_match.group(1))
+
+    return None
+
+
+def _extract_ml_from_label(portion_label: str) -> Optional[float]:
+    """
+    Extract milliliters from portion_label like '250ml', '500 mL', '1.5L'.
+
+    Returns:
+        Milliliters as float, or None if not found
+    """
+    if not portion_label:
+        return None
+
+    label_lower = portion_label.lower()
+
+    # Match liters first (convert to mL)
+    l_match = re.search(r'(\d+(?:\.\d+)?)\s*l(?:iters?)?(?:\s|$)', label_lower)
+    if l_match:
+        return float(l_match.group(1)) * 1000.0
+
+    # Match milliliters
+    ml_match = re.search(r'(\d+(?:\.\d+)?)\s*ml', label_lower)
+    if ml_match:
+        return float(ml_match.group(1))
+
+    return None
+
+
 def _extract_oz_from_label(portion_label: str) -> Optional[float]:
     """
     Extract ounces from portion_label like '14 oz', '16oz', '12 fl oz'.
@@ -567,6 +617,25 @@ def resolve_portions(items: List[Dict[str, Any]], usda_client=None) -> tuple[Lis
             resolution_source = "brand-size-lookup"
             metrics["brand_size"] += 1
             print(f"DEBUG: Portion resolver tier 2 (brand+size): '{name}' = {resolved_grams}g")
+
+        # 2.4) User-volunteered grams (e.g., "300g", "1.5kg")
+        if not resolved_grams:
+            user_grams = _extract_grams_from_label(portion_label)
+            if user_grams:
+                resolved_grams = user_grams
+                resolution_source = "user-grams-label"
+                metrics["brand_size"] += 1  # Count as deterministic
+                print(f"DEBUG: Portion resolver tier 2.4 (user-grams): '{name}' = {user_grams}g from portion_label")
+
+        # 2.45) User-volunteered mL (e.g., "250ml", "1.5L") - convert via density
+        if not resolved_grams:
+            user_ml = _extract_ml_from_label(portion_label)
+            if user_ml:
+                density = _get_density_for_ingredient(name)
+                resolved_grams = user_ml * density
+                resolution_source = "user-ml-label"
+                metrics["brand_size"] += 1  # Count as deterministic
+                print(f"DEBUG: Portion resolver tier 2.45 (user-ml): '{name}' = {user_ml}mL × {density}g/mL = {resolved_grams:.1f}g")
 
         # 2.5) Scoop-based resolution for powders (protein powder, etc.)
         if not resolved_grams:

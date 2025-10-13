@@ -5,12 +5,14 @@ from typing import Literal
 class Ingredient(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
 
+    id: str | None = None           # stable UUID for tracking through pipeline (assigned by vision)
     name: str                       # normalized common name (e.g., "chicken thigh")
     amount: float | None = Field(default=None, ge=0)  # grams (optional - only if user/vision stated exact amount)
     unit: Literal["g"] = "g"        # grams only (prompts enforce conversion via density)
     source: Literal["vision","user","default","search","estimation","web","portion-resolver"]  # provenance
     portion_label: str | None = None  # size/variant label when grams unknown (e.g., "medium", "large", "2 cups")
     notes: str | None = None        # e.g., "boneless, skinless"
+    parent_id: str | None = None    # if this ingredient replaces a composite item, store parent's id
 
     # Optional fields for composite dishes (biryani, salads, etc.)
     container_type: Literal["plate","bowl","tray","glass","cup","side"] | None = None

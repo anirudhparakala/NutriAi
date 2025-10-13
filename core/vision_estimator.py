@@ -166,6 +166,13 @@ Please retry the request and provide ONLY the JSON response.
             except:
                 parsed_estimate.raw_model = {"raw_text": response_text}
 
+            # Assign stable IDs to ingredients if not present
+            import uuid
+            if parsed_estimate.ingredients:
+                for ing in parsed_estimate.ingredients:
+                    if hasattr(ing, 'id') and not ing.id:
+                        ing.id = f"ing_{uuid.uuid4().hex[:8]}"
+
             # Apply UX guardrail: filter questions to max 2, high-impact only
             if parsed_estimate.critical_questions:
                 from core.schemas import ClarificationQuestion

@@ -5,6 +5,59 @@ import os
 from typing import List, Dict, Optional
 
 DB_PATH = "nutri_ai.db"
+SCHEMA_VERSION = 2  # Bump this when making schema changes
+
+
+def get_schema_version(con):
+    """Get current schema version from database."""
+    try:
+        cur = con.cursor()
+        cur.execute("SELECT version FROM schema_version ORDER BY id DESC LIMIT 1")
+        result = cur.fetchone()
+        return result[0] if result else 0
+    except sqlite3.OperationalError:
+        # Table doesn't exist, schema version is 0
+        return 0
+
+
+def set_schema_version(con, version):
+    """Set schema version in database."""
+    cur = con.cursor()
+    cur.execute("""CREATE TABLE IF NOT EXISTS schema_version (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        version INTEGER NOT NULL,
+        migrated_at REAL NOT NULL
+    )""")
+    cur.execute("INSERT INTO schema_version (version, migrated_at) VALUES (?, ?)", (version, time.time()))
+    con.commit()
+
+
+def migrate_schema(con):
+    """Run migrations to bring database up to current schema version."""
+    current_version = get_schema_version(con)
+    cur = con.cursor()
+
+    if current_version < 1:
+        # Migration 1: Initial schema with metadata columns
+        print("Running migration 1: Adding metadata columns to sessions table")
+        try:
+            cur.execute("ALTER TABLE sessions ADD COLUMN model_name TEXT")
+            cur.execute("ALTER TABLE sessions ADD COLUMN prompt_version TEXT")
+            cur.execute("ALTER TABLE sessions ADD COLUMN generation_config_json TEXT")
+            con.commit()
+            set_schema_version(con, 1)
+            print("Migration 1 complete")
+        except sqlite3.OperationalError as e:
+            # Column might already exist
+            print(f"Migration 1 skipped or already applied: {e}")
+            set_schema_version(con, 1)
+
+    if current_version < 2:
+        # Migration 2: Future migrations go here
+        # For now, just bump version
+        set_schema_version(con, 2)
+
+    print(f"Database schema is at version {SCHEMA_VERSION}")
 
 
 def init():
@@ -76,6 +129,10 @@ def init():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_usda_candidates_session ON usda_candidates(session_id);")
 
     con.commit()
+
+    # Run migrations to ensure schema is up to date
+    migrate_schema(con)
+
     con.close()
     # Only log database creation, not every table check
     if not hasattr(init, '_already_logged'):

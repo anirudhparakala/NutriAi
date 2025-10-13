@@ -312,3 +312,36 @@ def extract_variant_tokens(name: str) -> tuple[str, set[str]]:
 
     # No parentheses - return full name as base
     return name.strip(), set()
+
+
+def normalize_for_matching(name: str) -> str:
+    """
+    Normalize ingredient name for Stage-2 matching.
+
+    Lowercases, strips punctuation, applies aliases, and tokenizes.
+
+    Args:
+        name: Ingredient name (e.g., "Basmati Rice", "dal (yellow)")
+
+    Returns:
+        Normalized name as space-separated tokens (e.g., "rice", "dal")
+    """
+    # Lowercase
+    name_lower = name.lower()
+
+    # Remove parenthetical variants for matching (treat "rice" same as "rice (basmati)")
+    name_lower = re.sub(r'\([^)]*\)', '', name_lower)
+
+    # Strip punctuation
+    name_lower = re.sub(r'[^\w\s]', ' ', name_lower)
+
+    # Apply aliases
+    for alias, canonical in NAME_ALIASES.items():
+        if alias in name_lower:
+            name_lower = name_lower.replace(alias, canonical)
+
+    # Normalize whitespace and tokenize
+    tokens = name_lower.split()
+
+    # Return space-separated tokens
+    return ' '.join(tokens)
