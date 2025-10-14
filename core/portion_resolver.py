@@ -565,6 +565,92 @@ def _clamp_by_category(name: str, grams: float) -> float:
     return grams
 
 
+def infer_portion_class(canonical_name: str, portion_label: str) -> str:
+    """
+    Infer portion class for countable/garnish items.
+
+    Returns: countable_protein | countable_starch | countable_pastry | leafy_herb | aromatic_dice | sauce_condiment | unknown
+    """
+    name_lower = canonical_name.lower()
+    label_lower = portion_label.lower() if portion_label else ""
+
+    # Countable protein (meatballs, kebabs, etc.)
+    PROTEIN_KEYWORDS = {'kofta', 'meatball', 'kebab', 'kabob', 'nugget', 'wing', 'drum', 'tender', 'cutlet', 'falafel', 'tikka'}
+    if any(kw in name_lower for kw in PROTEIN_KEYWORDS):
+        return "countable_protein"
+
+    # Countable starch (dumplings, pasta pieces, etc.)
+    STARCH_KEYWORDS = {'dumpling', 'gnocchi', 'momo', 'ravioli', 'sushi', 'roll', 'samosa', 'pakora'}
+    if any(kw in name_lower for kw in STARCH_KEYWORDS):
+        return "countable_starch"
+
+    # Countable pastry (cookies, sweets, etc.)
+    PASTRY_KEYWORDS = {'cookie', 'macaron', 'laddu', 'ladoo', 'donut', 'doughnut', 'biscuit', 'brownie'}
+    if any(kw in name_lower for kw in PASTRY_KEYWORDS):
+        return "countable_pastry"
+
+    # Leafy herbs (garnishes)
+    HERB_KEYWORDS = {'cilantro', 'coriander leaves', 'parsley', 'mint', 'basil', 'dill'}
+    if any(kw in name_lower for kw in HERB_KEYWORDS):
+        return "leafy_herb"
+
+    # Aromatic dice (onion, garlic, etc.)
+    AROMATIC_KEYWORDS = {'onion', 'shallot', 'scallion', 'garlic', 'ginger'}
+    if any(kw in name_lower for kw in AROMATIC_KEYWORDS):
+        return "aromatic_dice"
+
+    # Sauce/condiment
+    SAUCE_KEYWORDS = {'chutney', 'salsa', 'ketchup', 'mayo', 'raita', 'gravy', 'syrup', 'sauce', 'dip', 'dressing'}
+    if any(kw in name_lower for kw in SAUCE_KEYWORDS):
+        return "sauce_condiment"
+
+    return "unknown"
+
+
+def extract_countable_pattern(portion_label: str) -> Optional[tuple[int, str]]:
+    """
+    Extract count from patterns like "12 pieces", "3 slices", "5 nuggets".
+
+    Returns: (count, unit) or None
+    """
+    if not portion_label:
+        return None
+
+    # Pattern: number + optional space + countable unit
+    pattern = r'(\d+)\s*(piece|pieces|slice|slices|nugget|nuggets|wing|wings|roll|rolls|item|items|count)\b'
+    match = re.search(pattern, portion_label.lower())
+
+    if match:
+        count = int(match.group(1))
+        unit = match.group(2)
+        return (count, unit)
+
+    return None
+
+
+def is_garnish_pattern(portion_label: str, name: str) -> bool:
+    """
+    Detect garnish/topping patterns.
+    """
+    if not portion_label:
+        return False
+
+    label_lower = portion_label.lower()
+    name_lower = name.lower()
+
+    # Explicit garnish markers
+    GARNISH_MARKERS = {'chopped', 'sprinkle', 'garnish', 'on top', 'topping', 'diced', 'minced', 'side'}
+    if any(marker in label_lower for marker in GARNISH_MARKERS):
+        return True
+
+    # Herbs are usually garnishes unless large amount specified
+    HERB_NAMES = {'cilantro', 'parsley', 'mint', 'basil', 'dill', 'coriander'}
+    if any(herb in name_lower for herb in HERB_NAMES) and not any(amt in label_lower for amt in ['cup', 'handful', 'bunch']):
+        return True
+
+    return False
+
+
 def resolve_portions(items: List[Dict[str, Any]], usda_client=None) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
     """
     Resolve portion sizes to deterministic grams.
@@ -583,6 +669,8 @@ def resolve_portions(items: List[Dict[str, Any]], usda_client=None) -> tuple[Lis
     Returns:
         Tuple of (updated items list with resolved grams, metrics dict with tier counts)
     """
+    import json
+
     out = []
     metrics = {
         "user_vision": 0,
@@ -715,6 +803,54 @@ def resolve_portions(items: List[Dict[str, Any]], usda_client=None) -> tuple[Lis
                 metrics["brand_size"] += 1  # Count as deterministic
                 print(f"DEBUG: Portion resolver tier 2.8 (container-capacity): '{name}' = {resolved_grams}g")
 
+        # 2.9) Countable items with self-learning priors
+        if not resolved_grams:
+            countable_result = extract_countable_pattern(portion_label)
+            if countable_result:
+                count, unit = countable_result
+                portion_class = infer_portion_class(name, portion_label)
+
+                # Try self-learning prior first
+                from integrations import db
+                prior_grams_per_piece = db.get_portion_prior(portion_class, "pieces")
+
+                if prior_grams_per_piece:
+                    resolved_grams = count * prior_grams_per_piece
+                    resolution_source = f"countable-{portion_class}-prior"
+                    metrics["brand_size"] += 1
+                    print(f"DEBUG: Portion resolver tier 2.9 (countable-prior): '{name}' = {count} × {prior_grams_per_piece:.1f}g = {resolved_grams:.1f}g (class: {portion_class}, learned)")
+                else:
+                    # Fallback to defaults
+                    GRAMS_PER_PIECE_DEFAULTS = {
+                        "countable_protein": 30,  # kofta, meatballs, falafel
+                        "countable_starch": 25,   # dumplings, samosa
+                        "countable_pastry": 25,   # cookies, ladoo
+                    }
+
+                    grams_per_piece = GRAMS_PER_PIECE_DEFAULTS.get(portion_class)
+                    if grams_per_piece:
+                        resolved_grams = count * grams_per_piece
+                        resolution_source = f"countable-{portion_class}-default"
+                        metrics["brand_size"] += 1
+                        print(f"DEBUG: Portion resolver tier 2.9 (countable-default): '{name}' = {count} × {grams_per_piece}g = {resolved_grams}g (class: {portion_class})")
+
+        # 2.95) Garnish pattern detection
+        if not resolved_grams:
+            if is_garnish_pattern(portion_label, name):
+                portion_class = infer_portion_class(name, portion_label)
+
+                # Default garnish amounts by class
+                GARNISH_DEFAULTS = {
+                    "leafy_herb": 10,      # cilantro, parsley
+                    "aromatic_dice": 30,   # chopped onion, garlic
+                    "sauce_condiment": 20, # chutneys, dips
+                }
+
+                resolved_grams = GARNISH_DEFAULTS.get(portion_class, 20)  # Default 20g for unknown garnishes
+                resolution_source = f"garnish-{portion_class}"
+                metrics["brand_size"] += 1  # Count as deterministic
+                print(f"DEBUG: Portion resolver tier 2.95 (garnish): '{name}' = {resolved_grams}g (class: {portion_class})")
+
         # 3) USDA foodPortions (TODO: implement when needed)
         # if not resolved_grams and usda_client:
         #     resolved_grams = _grams_from_usda_portions(usda_client, name, portion_label)
@@ -735,6 +871,36 @@ def resolve_portions(items: List[Dict[str, Any]], usda_client=None) -> tuple[Lis
             resolution_source = "vision-estimate-fallback"
             metrics["category_heuristic"] += 1  # Count as heuristic since it's not explicit
             print(f"DEBUG: Portion resolver tier 5 (vision fallback): '{name}' = {resolved_grams}g")
+
+        # Apply global numeric bands first (hard bounds)
+        if resolved_grams:
+            original_grams = resolved_grams
+
+            # Global bands based on resolution type
+            if "countable" in resolution_source:
+                # Grams per piece must be reasonable
+                countable_result = extract_countable_pattern(portion_label)
+                if countable_result:
+                    count, _ = countable_result
+                    grams_per_piece = resolved_grams / count
+                    if grams_per_piece < 5 or grams_per_piece > 250:
+                        print(f"WARN: Grams per piece {grams_per_piece:.1f}g out of range [5, 250], clamping")
+                        grams_per_piece = max(5, min(250, grams_per_piece))
+                        resolved_grams = count * grams_per_piece
+
+            elif "garnish" in resolution_source:
+                # Garnishes shouldn't exceed 60g or 10% of main items
+                if resolved_grams > 60:
+                    print(f"WARN: Garnish {resolved_grams}g exceeds 60g limit, clamping")
+                    resolved_grams = 60
+
+            # Global total grams bounds
+            if resolved_grams < 20 or resolved_grams > 1500:
+                print(f"WARN: Total grams {resolved_grams}g out of range [20, 1500], clamping")
+                resolved_grams = max(20, min(1500, resolved_grams))
+
+            if resolved_grams != original_grams:
+                print(f"METRICS: {json.dumps({'event': 'portion_clamped', 'original': original_grams, 'clamped': resolved_grams, 'source': resolution_source})}")
 
         # Apply category-based sanity clamp
         if resolved_grams:

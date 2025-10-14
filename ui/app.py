@@ -584,7 +584,7 @@ def main():
 
             breakdown_list = data.get("breakdown", [])
             attribution_list = data.get("attribution", [])
-            validations = data.get("validations", {})
+            validations = data.get("validations") or {}  # Handle None case
             explanation = data.get("explanation", "")
             follow_up_question = data.get("follow_up_question", "")
 

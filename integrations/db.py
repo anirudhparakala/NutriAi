@@ -5,7 +5,7 @@ import os
 from typing import List, Dict, Optional
 
 DB_PATH = "nutri_ai.db"
-SCHEMA_VERSION = 2  # Bump this when making schema changes
+SCHEMA_VERSION = 3  # Bump this when making schema changes
 
 
 def get_schema_version(con):
@@ -53,9 +53,29 @@ def migrate_schema(con):
             set_schema_version(con, 1)
 
     if current_version < 2:
-        # Migration 2: Future migrations go here
-        # For now, just bump version
+        # Migration 2: Reserved
         set_schema_version(con, 2)
+
+    if current_version < 3:
+        # Migration 3: Add self-learning portion priors table
+        print("Running migration 3: Creating portion_priors table")
+        try:
+            cur.execute("""CREATE TABLE IF NOT EXISTS portion_priors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                portion_class TEXT NOT NULL,
+                base_label TEXT NOT NULL,
+                grams_per_unit REAL NOT NULL,
+                samples INTEGER NOT NULL DEFAULT 1,
+                updated_at REAL NOT NULL,
+                UNIQUE(portion_class, base_label)
+            )""")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_portion_priors_lookup ON portion_priors(portion_class, base_label)")
+            con.commit()
+            set_schema_version(con, 3)
+            print("Migration 3 complete")
+        except sqlite3.OperationalError as e:
+            print(f"Migration 3 skipped or already applied: {e}")
+            set_schema_version(con, 3)
 
     print(f"Database schema is at version {SCHEMA_VERSION}")
 
@@ -476,3 +496,69 @@ def get_db_stats() -> Dict:
         "common_dishes": common_dishes,
         "db_path": DB_PATH
     }
+
+
+def get_portion_prior(portion_class: str, base_label: str) -> Optional[float]:
+    """
+    Get learned grams_per_unit for a (class, base_label) bucket.
+
+    Returns:
+        grams_per_unit or None if not found
+    """
+    if not os.path.exists(DB_PATH):
+        return None
+
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+
+    cur.execute("""
+        SELECT grams_per_unit FROM portion_priors
+        WHERE portion_class = ? AND base_label = ?
+    """, (portion_class, base_label))
+
+    result = cur.fetchone()
+    con.close()
+
+    return result[0] if result else None
+
+
+def update_portion_prior(portion_class: str, base_label: str, grams_per_unit: float):
+    """
+    Update self-learning prior with rolling median.
+
+    Uses INSERT OR REPLACE to maintain rolling average.
+    """
+    if not os.path.exists(DB_PATH):
+        init()
+
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+
+    # Check if exists
+    cur.execute("""
+        SELECT grams_per_unit, samples FROM portion_priors
+        WHERE portion_class = ? AND base_label = ?
+    """, (portion_class, base_label))
+
+    existing = cur.fetchone()
+
+    if existing:
+        # Rolling average: weight new sample equally
+        old_value, old_samples = existing
+        new_samples = old_samples + 1
+        new_value = (old_value * old_samples + grams_per_unit) / new_samples
+
+        cur.execute("""
+            UPDATE portion_priors
+            SET grams_per_unit = ?, samples = ?, updated_at = ?
+            WHERE portion_class = ? AND base_label = ?
+        """, (new_value, new_samples, time.time(), portion_class, base_label))
+    else:
+        # Insert new
+        cur.execute("""
+            INSERT INTO portion_priors (portion_class, base_label, grams_per_unit, samples, updated_at)
+            VALUES (?, ?, ?, 1, ?)
+        """, (portion_class, base_label, grams_per_unit, time.time()))
+
+    con.commit()
+    con.close()

@@ -1,0 +1,144 @@
+{
+  "key": "vision:gemini-2.5-flash-lite:f29d98e:image_hash=75acf852a1a35930157403d1aa7f4200e2551d47e4d75d35d20c1c95227ea81f",
+  "value": {
+    "dish": "Kofta with red onion and cilantro salad",
+    "portion_guess_g": 350.0,
+    "ingredients": [
+      {
+        "id": "ing_b9fb099d",
+        "name": "kofta",
+        "amount": null,
+        "unit": "g",
+        "source": "estimation",
+        "portion_label": "12 pieces",
+        "notes": null,
+        "parent_id": null,
+        "container_type": null,
+        "fill_level": null,
+        "composition_ratios": null
+      },
+      {
+        "id": "ing_bfbc161c",
+        "name": "red onion",
+        "amount": null,
+        "unit": "g",
+        "source": "estimation",
+        "portion_label": "chopped",
+        "notes": null,
+        "parent_id": null,
+        "container_type": null,
+        "fill_level": null,
+        "composition_ratios": null
+      },
+      {
+        "id": "ing_e77802f6",
+        "name": "cilantro",
+        "amount": null,
+        "unit": "g",
+        "source": "estimation",
+        "portion_label": "chopped",
+        "notes": null,
+        "parent_id": null,
+        "container_type": null,
+        "fill_level": null,
+        "composition_ratios": null
+      }
+    ],
+    "critical_questions": [
+      {
+        "id": "kofta_protein",
+        "text": "What type of protein are the kofta made from?",
+        "options": [
+          "beef",
+          "lamb",
+          "chicken",
+          "vegetable"
+        ],
+        "default": "beef",
+        "impact_score": 0.8,
+        "follow_up_prompt": null
+      },
+      {
+        "id": "kofta_cooking_method",
+        "text": "How were the kofta cooked?",
+        "options": [
+          "grilled",
+          "fried",
+          "baked"
+        ],
+        "default": "grilled",
+        "impact_score": 0.6,
+        "follow_up_prompt": null
+      }
+    ],
+    "raw_model": {
+      "dish": "Kofta with red onion and cilantro salad",
+      "portion_guess_g": 350,
+      "ingredients": [
+        {
+          "name": "kofta",
+          "amount": null,
+          "unit": "g",
+          "source": "estimation",
+          "portion_label": "12 pieces",
+          "notes": null
+        },
+        {
+          "name": "red onion",
+          "amount": null,
+          "unit": "g",
+          "source": "estimation",
+          "portion_label": "chopped",
+          "notes": null
+        },
+        {
+          "name": "cilantro",
+          "amount": null,
+          "unit": "g",
+          "source": "estimation",
+          "portion_label": "chopped",
+          "notes": null
+        }
+      ],
+      "critical_questions": [
+        {
+          "id": "kofta_protein",
+          "text": "What type of protein are the kofta made from?",
+          "options": [
+            "beef",
+            "lamb",
+            "chicken",
+            "vegetable"
+          ],
+          "default": "beef",
+          "impact_score": 0.8
+        },
+        {
+          "id": "kofta_cooking_method",
+          "text": "How were the kofta cooked?",
+          "options": [
+            "grilled",
+            "fried",
+            "baked"
+          ],
+          "default": "grilled",
+          "impact_score": 0.6
+        },
+        {
+          "id": "dressing_type",
+          "text": "What kind of dressing, if any, was used on the salad?",
+          "options": [
+            "lemon vinaigrette",
+            "tahini",
+            "yogurt-based",
+            "none"
+          ],
+          "default": "none",
+          "impact_score": 0.5
+        }
+      ]
+    }
+  },
+  "ttl": 259200,
+  "created_at": 1760408709.331615
+}
