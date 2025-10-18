@@ -87,20 +87,22 @@ Context from conversation: {context}
 Based on this information, provide the JSON response with any updates to ingredients or assumptions.
 """
 
-        print(f"DEBUG: Sending refinement prompt to LLM")
+        print(f"DEBUG: Sending refinement prompt to LLM (FIX D: tools disabled for Stage-1)")
 
-        # Send message to chat session with tool support
-        # Always route through run_with_tools for consistent error handling
+        # FIX D: Disable tools for Stage-1 to prevent empty response failures
+        # Stage-1 should be JSON-only, no web search needed
+        # Send message to chat session WITHOUT tool support for reliability
         try:
-            response_text, tool_calls_count = run_with_tools(chat_session, available_tools or {}, full_prompt)
+            response_text, tool_calls_count = run_with_tools(chat_session, {}, full_prompt)  # Empty tools dict
         except ValueError as e:
-            # LLM returned empty response - retry once
+            # LLM returned empty response - retry once with minimal JSON-only prompt
             print(f"ERROR: LLM returned empty response on first attempt: {e}")
-            print(f"DEBUG: Retrying QA refinement with simpler prompt")
+            print(f"METRICS: {json.dumps({'event': 'qa_stage1_empty', 'attempt': 1})}")
+            print(f"DEBUG: Retrying QA refinement with simpler JSON-only prompt")
             retry_prompt = f"""
 User answers: {input_text}
 
-Return JSON with updated ingredients list. Each ingredient needs: name, amount (null if unknown), unit ("g"), source, portion_label, notes.
+Return ONLY valid JSON (no tools, no prose). Include updated ingredients list:
 
 {{
   "updated_ingredients": [...],
@@ -108,10 +110,13 @@ Return JSON with updated ingredients list. Each ingredient needs: name, amount (
 }}
 """
             try:
-                response_text, tool_calls_count = run_with_tools(chat_session, available_tools or {}, retry_prompt)
+                response_text, tool_calls_count = run_with_tools(chat_session, {}, retry_prompt)  # Empty tools dict
             except ValueError as retry_error:
                 print(f"ERROR: Retry also failed: {retry_error}")
-                return None, 0
+                print(f"METRICS: {json.dumps({'event': 'qa_stage1_empty', 'attempt': 2, 'fatal': True})}")
+                # Return minimal "no change" JSON instead of None
+                print(f"WARNING: Returning minimal no-change JSON to allow Stage-2 to proceed")
+                return RefinementUpdate(updated_ingredients=[], updated_assumptions=[]), 0
 
         print(f"DEBUG: LLM response received, length: {len(response_text)} chars")
         print(f"DEBUG: LLM response text: {response_text[:500]}...")
@@ -269,15 +274,185 @@ def generate_stage2_question(ingredients: List[Dict[str, Any]]) -> Dict[str, Any
         "options": ["Looks right", "I want to adjust"],
         "default": "Looks right",
         "impact_score": 0.3,
-        "follow_up_prompt": "Use 'name amount unit', e.g., 'rice 2 cups; dal 0.5 cup; ghee 1 tbsp'",
+        "follow_up_prompt": "Use 'name amount unit' to adjust or add components. Examples: 'rice 2 cups; dal 0.5 cup; 1 scoop whey protein; 2 tbsp syrup'",
         "checksum": checksum,
         "ingredients_snapshot": ingredients  # For validation
     }
 
 
+def _deterministic_parse_stage2(user_text: str) -> List[Dict[str, Any]]:
+    """
+    Deterministic pre-parser for Stage-2 adjustments using regex and lexicons.
+
+    Returns:
+        List of edit dicts with {"action": str, "item_head": str, "value": str, "variant": str (optional)}
+    """
+    import re
+
+    # Lexicons
+    SIZE_LEXICON = r'\b(small|medium|regular|large|x-large|xl|xlarge|kid|side)\b'
+    VARIANT_LEXICON = r'\b(diet|zero|zero sugar|light|lite|coke zero|pepsi zero)\b'
+    UNIT_LEXICON = r'\b(cup|cups|tbsp|tsp|teaspoon|tablespoon|piece|pieces|slice|slices|scoop|scoops|oz|ounce|ounces|ml|l|liter|liters|g|gram|grams|kg)\b'
+
+    # Synonym normalization
+    SYNONYMS = {
+        'xl': 'x-large',
+        'xlarge': 'x-large',
+        'zero sugar': 'diet',
+        'coke zero': 'diet',
+        'pepsi zero': 'diet',
+        'reg': 'regular',
+        'teaspoon': 'tsp',
+        'tablespoon': 'tbsp',
+        'ounce': 'oz',
+        'ounces': 'oz',
+        'gram': 'g',
+        'grams': 'g',
+        'liter': 'l',
+        'liters': 'l',
+    }
+
+    # Split on separators
+    separators = r'[;\n,]|\band\b|\b&\b'
+    chunks = re.split(separators, user_text)
+    chunks = [c.strip() for c in chunks if c.strip()]
+
+    edits = []
+
+    for chunk in chunks:
+        chunk_lower = chunk.lower()
+        chunk_normalized = ' '.join(chunk_lower.split())  # Collapse spaces
+
+        # Apply synonyms
+        for syn, replacement in SYNONYMS.items():
+            chunk_normalized = re.sub(r'\b' + re.escape(syn) + r'\b', replacement, chunk_normalized)
+
+        # Check for ordinal markers (#2, second, 2nd)
+        ordinal = None
+        ordinal_match = re.search(r'#(\d+)|(\d+)(?:st|nd|rd|th)|(first|second|third|fourth|fifth)', chunk_normalized)
+        if ordinal_match:
+            if ordinal_match.group(1):  # #2
+                ordinal = int(ordinal_match.group(1))
+            elif ordinal_match.group(2):  # 2nd
+                ordinal = int(ordinal_match.group(2))
+            elif ordinal_match.group(3):  # second
+                ordinal_words = {'first': 1, 'second': 2, 'third': 3, 'fourth': 4, 'fifth': 5}
+                ordinal = ordinal_words.get(ordinal_match.group(3), 1)
+            # Remove ordinal from chunk
+            chunk_normalized = re.sub(r'#\d+|\d+(?:st|nd|rd|th)|\b(?:first|second|third|fourth|fifth)\b', '', chunk_normalized).strip()
+
+        # Pattern 1: <size> <item> (e.g., "large fries")
+        match = re.match(r'^(' + SIZE_LEXICON + r')\s+(.+)$', chunk_normalized)
+        if match:
+            size, item_name = match.groups()
+            edits.append({
+                "action": "SET_PORTION_LABEL",
+                "item_head": item_name.strip(),
+                "value": size.strip(),
+                "ordinal": ordinal
+            })
+            continue
+
+        # Pattern 2: <variant> <item> (e.g., "diet cola")
+        match = re.match(r'^(' + VARIANT_LEXICON + r')\s+(.+)$', chunk_normalized)
+        if match:
+            variant, item_name = match.groups()
+            edits.append({
+                "action": "SET_VARIANT",
+                "item_head": item_name.strip(),
+                "variant": variant.strip(),
+                "ordinal": ordinal
+            })
+            continue
+
+        # Pattern 3: <qty> <unit> <item> (e.g., "2 cups rice", "12 oz cola")
+        match = re.match(r'^(\d+(?:\.\d+)?)\s*(' + UNIT_LEXICON + r')\s+(.+)$', chunk_normalized)
+        if match:
+            qty, unit, item_name = match.groups()
+            edits.append({
+                "action": "SET_PORTION_LABEL",
+                "item_head": item_name.strip(),
+                "value": f"{qty} {unit}".strip(),
+                "ordinal": ordinal
+            })
+            continue
+
+        # Pattern 4: <item> <size> (e.g., "fries large")
+        match = re.match(r'^(.+?)\s+(' + SIZE_LEXICON + r')$', chunk_normalized)
+        if match:
+            item_name, size = match.groups()
+            edits.append({
+                "action": "SET_PORTION_LABEL",
+                "item_head": item_name.strip(),
+                "value": size.strip(),
+                "ordinal": ordinal
+            })
+            continue
+
+        # Pattern 5: <item> <variant> (e.g., "cola diet")
+        match = re.match(r'^(.+?)\s+(' + VARIANT_LEXICON + r')$', chunk_normalized)
+        if match:
+            item_name, variant = match.groups()
+            edits.append({
+                "action": "SET_VARIANT",
+                "item_head": item_name.strip(),
+                "variant": variant.strip(),
+                "ordinal": ordinal
+            })
+            continue
+
+        # Pattern 6: <item> <qty> <unit> (e.g., "rice 2 cups", "cola 12 oz")
+        match = re.match(r'^(.+?)\s+(\d+(?:\.\d+)?)\s*(' + UNIT_LEXICON + r')$', chunk_normalized)
+        if match:
+            item_name, qty, unit = match.groups()
+            edits.append({
+                "action": "SET_PORTION_LABEL",
+                "item_head": item_name.strip(),
+                "value": f"{qty} {unit}".strip(),
+                "ordinal": ordinal
+            })
+            continue
+
+        # Pattern 7: <item>: <value> or <item>=<value>
+        match = re.match(r'^(.+?)\s*[:=]\s*(.+)$', chunk_normalized)
+        if match:
+            item_name, value = match.groups()
+            # Check if value is size or variant
+            if re.match(SIZE_LEXICON, value):
+                edits.append({
+                    "action": "SET_PORTION_LABEL",
+                    "item_head": item_name.strip(),
+                    "value": value.strip(),
+                    "ordinal": ordinal
+                })
+            elif re.match(VARIANT_LEXICON, value):
+                edits.append({
+                    "action": "SET_VARIANT",
+                    "item_head": item_name.strip(),
+                    "variant": value.strip(),
+                    "ordinal": ordinal
+                })
+            elif re.match(r'^\d+(?:\.\d+)?\s*' + UNIT_LEXICON + r'$', value):
+                edits.append({
+                    "action": "SET_PORTION_LABEL",
+                    "item_head": item_name.strip(),
+                    "value": value.strip(),
+                    "ordinal": ordinal
+                })
+            continue
+
+        # No pattern matched - mark for LLM fallback
+        edits.append({
+            "action": "UNPARSED",
+            "chunk": chunk_normalized
+        })
+
+    return edits
+
+
 def apply_stage2_adjustments(ingredients: List[Dict[str, Any]], stage2_answer: dict, chat_session: genai.ChatSession, available_tools: dict) -> dict:
     """
-    Apply Stage-2 quantity adjustments to ingredients.
+    Apply Stage-2 quantity adjustments to ingredients using deterministic-first parsing.
 
     Args:
         ingredients: List of ingredient dicts
@@ -321,45 +496,32 @@ def apply_stage2_adjustments(ingredients: List[Dict[str, Any]], stage2_answer: d
             "match_map": {}
         }
 
-    # First try regex parsing for common patterns
-    adjustments = []
+    # Step 1: Use deterministic pre-parser
+    print(f"DEBUG: Applying deterministic Stage-2 parser on: {answer_value}")
+    parsed_edits = _deterministic_parse_stage2(answer_value)
+    print(f"DEBUG: Deterministic parser returned {len(parsed_edits)} edits")
+
+    # Separate parsable edits from unparsed chunks
+    deterministic_edits = [e for e in parsed_edits if e.get("action") != "UNPARSED"]
+    unparsed_chunks = [e.get("chunk") for e in parsed_edits if e.get("action") == "UNPARSED"]
+
     match_map = {}
-    parse_method = "regex"
+    parse_method = "regex" if deterministic_edits else "llm"
 
-    # Support both formats:
-    # Pattern 1: "milk 22 oz" - <name> <number> <unit>
-    # Pattern 2: "22 oz milk" - <number> <unit> <name>
+    # Step 2: Try LLM for unparsed chunks only (if any and if input is long enough)
+    llm_edits = []
+    if unparsed_chunks and len(answer_value) >= 50:
+        print(f"DEBUG: {len(unparsed_chunks)} chunks unparsed, trying LLM for: {unparsed_chunks}")
 
-    # Try pattern 2 first (more common user input: "22 oz milk")
-    pattern2 = r'(\d+(?:\.\d+)?)\s*([a-zA-Z]+)\s+([a-zA-Z\s]+?)(?:[;,]|$)'
-    matches_p2 = re.findall(pattern2, answer_value)
+        # Bulletize chunks to reduce null replies
+        bulletized_chunks = "\n".join([f"- {chunk}" for chunk in unparsed_chunks])
 
-    if matches_p2:
-        print(f"DEBUG: Stage-2 regex (amount-first) found {len(matches_p2)} matches")
-        for match in matches_p2:
-            amount, unit, name_part = match
-            name_part = name_part.strip()
-            new_portion_label = f"{amount} {unit}"
-            adjustments.append({"name": name_part, "new_portion_label": new_portion_label})
-    else:
-        # Try pattern 1: "milk 22 oz"
-        pattern1 = r'([a-zA-Z\s]+?)\s+(\d+(?:\.\d+)?)\s*([a-zA-Z]+)'
-        matches_p1 = re.findall(pattern1, answer_value)
-        if matches_p1:
-            print(f"DEBUG: Stage-2 regex (name-first) found {len(matches_p1)} matches")
-            for match in matches_p1:
-                name_part, amount, unit = match
-                name_part = name_part.strip()
-                new_portion_label = f"{amount} {unit}"
-                adjustments.append({"name": name_part, "new_portion_label": new_portion_label})
-        else:
-            # Fallback to LLM parsing
-            parse_method = "llm"
-            adjustment_prompt = f"""
+        adjustment_prompt = f"""
 User wants to adjust portion quantities. Original estimates:
 {json.dumps([{'name': ing.get('name'), 'portion_label': ing.get('portion_label')} for ing in ingredients], indent=2)}
 
-User's adjustments: "{answer_value}"
+User's adjustments (only parse these):
+{bulletized_chunks}
 
 Parse the user's adjustments and return updated portion_label values. Return JSON only:
 
@@ -372,71 +534,251 @@ Parse the user's adjustments and return updated portion_label values. Return JSO
 CRITICAL: Only include items the user mentioned. Accept grams/mL if user specified them, otherwise use human units (cups, tbsp, pieces, slices).
 """
 
-            try:
-                response_text, tool_calls = run_with_tools(chat_session, available_tools, adjustment_prompt)
+        try:
+            response_text, tool_calls = run_with_tools(chat_session, available_tools, adjustment_prompt)
+
+            # Guard against empty/whitespace responses
+            if not response_text or not response_text.strip():
+                print(f"ERROR: LLM returned empty response for Stage-2 adjustments")
+                print(f"METRICS: {json.dumps({'event': 'qa_quantity_parse', 'method': 'llm', 'ok': False, 'reason': 'empty'})}")
+            else:
                 response_data = json.loads(response_text)
-                adjustments = response_data.get('adjustments', [])
-                print(f"DEBUG: Stage-2 LLM parse found {len(adjustments)} adjustments")
-            except Exception as e:
-                print(f"ERROR: Failed to parse Stage-2 adjustments with LLM: {e}")
-                print(f"METRICS: {json.dumps({'event': 'qa_quantity_parse', 'method': 'llm', 'ok': False, 'items': 0})}")
-                return {
-                    "ok": False,
-                    "ingredients": ingredients,
-                    "applied_count": 0,
-                    "message": "I couldn't understand the edits. Try 'rice 2 cups; dal 0.5 cup'",
-                    "match_map": {}
-                }
+                llm_edits_raw = response_data.get('adjustments', [])
 
-    # Apply adjustments with tightened name matching
-    from .normalize import normalize_for_matching
-    changed_count = 0
+                # Convert LLM format to our edit format
+                for adj in llm_edits_raw:
+                    llm_edits.append({
+                        "action": "SET_PORTION_LABEL",
+                        "item_head": adj.get("name", ""),
+                        "value": adj.get("new_portion_label", "")
+                    })
 
-    for adj in adjustments:
-        adj_name = adj.get('name', '')
-        adj_name_normalized = normalize_for_matching(adj_name)
-        new_portion = adj.get('new_portion_label', '')
+                print(f"DEBUG: Stage-2 LLM parse found {len(llm_edits)} additional adjustments")
+                parse_method = "hybrid"
+        except Exception as e:
+            print(f"ERROR: Failed to parse Stage-2 adjustments with LLM: {e}")
+            print(f"METRICS: {json.dumps({'event': 'qa_quantity_parse', 'method': 'llm', 'ok': False, 'reason': str(e)})}")
+            # Don't fail - continue with deterministic edits only
 
-        matched = False
-        for ing in ingredients:
-            ing_name = ing.get('name', '')
-            ing_name_normalized = normalize_for_matching(ing_name)
+    # Combine deterministic + LLM edits
+    all_edits = deterministic_edits + llm_edits
 
-            # Tightened matching: require head-token equality or significant overlap
-            if _names_match(adj_name_normalized, ing_name_normalized):
-                old_portion = ing.get('portion_label', '')
-                ing['portion_label'] = new_portion
-                ing['source'] = 'user'  # Mark as user-provided
-                changed_count += 1
-                match_map[adj_name] = ing_name
-                print(f"DEBUG: Stage-2 adjusted '{ing_name}': '{old_portion}' → '{new_portion}'")
-                matched = True
-                break
-
-        if not matched:
-            print(f"WARNING: Stage-2 could not match adjustment '{adj_name}' to any ingredient")
-
-    parse_ok = changed_count > 0
-    print(f"METRICS: {json.dumps({'event': 'qa_quantity_parse', 'method': parse_method, 'ok': parse_ok, 'items': len(adjustments)})}")
-    print(f"METRICS: {json.dumps({'event': 'qa_quantity_changed', 'changed': changed_count, 'total': len(ingredients)})}")
-    print(f"METRICS: {json.dumps({'event': 'qa_quantity_match_map', 'map': match_map})}")
-
-    if changed_count == 0:
+    if not all_edits:
+        print(f"ERROR: No edits parsed from user input")
+        print(f"METRICS: {json.dumps({'event': 'qa_quantity_parse', 'method': parse_method, 'ok': False, 'items': 0})}")
         return {
             "ok": False,
             "ingredients": ingredients,
             "applied_count": 0,
-            "message": "I couldn't match your changes to the ingredients. Try using the exact ingredient names.",
+            "message": "I couldn't understand the edits. Try formats like: 'large fries, diet cola' or 'rice 2 cups; dal 0.5 cup'",
+            "match_map": {}
+        }
+
+    # Step 3: Apply edits with safe matching and variant handling
+    from .normalize import normalize_for_matching, canonicalize_name
+    from .schemas import Ingredient
+    import uuid
+
+    changed_count = 0
+    added_count = 0
+    variant_count = 0
+    skipped_edits = []
+
+    # Soft drink keywords for variant detection
+    SOFT_DRINK_KEYWORDS = ['cola', 'coke', 'pepsi', 'sprite', 'fanta', 'soda', 'pop', 'lemonade', 'tea', 'coffee']
+
+    for edit in all_edits:
+        action = edit.get("action")
+        item_head = edit.get("item_head", "")
+        value = edit.get("value", "")
+        variant = edit.get("variant")
+        ordinal = edit.get("ordinal")
+
+        # Use safe matching to find ingredient (with ordinal disambiguation if provided)
+        matched_ing, confidence = _safe_match_ingredient(item_head, ingredients, ordinal=ordinal)
+
+        if not matched_ing:
+            # No match - skip this edit for now
+            skipped_edits.append({"item": item_head, "reason": "no_match"})
+            print(f"DEBUG: Stage-2 couldn't match '{item_head}' to any ingredient (skipped)")
+            continue
+
+        if action == "SET_PORTION_LABEL":
+            # Set portion_label, preserving existing values if needed
+            old_portion = matched_ing.get('portion_label', '')
+            matched_ing['portion_label'] = value
+            matched_ing['source'] = 'user'  # Mark as user-provided
+            changed_count += 1
+            match_map[item_head] = matched_ing.get('name')
+            print(f"DEBUG: Stage-2 adjusted '{matched_ing.get('name')}': portion_label '{old_portion}' → '{value}'")
+
+        elif action == "SET_VARIANT" and variant:
+            # Handle variant (diet/zero/light) for soft drinks
+            ing_name = matched_ing.get('name', '')
+            ing_name_lower = ing_name.lower()
+
+            # Check if this is a soft drink
+            is_soft_drink = any(kw in ing_name_lower for kw in SOFT_DRINK_KEYWORDS)
+
+            if is_soft_drink:
+                # Update name to include critical modifier in parentheses
+                # Remove existing variant parens first
+                base_name = ing_name.split('(')[0].strip()
+                new_name = f"{base_name} ({variant})"
+                matched_ing['name'] = new_name
+                matched_ing['source'] = 'user'
+                variant_count += 1
+                match_map[item_head] = new_name
+                print(f"DEBUG: Stage-2 set variant for '{base_name}': → '{new_name}'")
+            else:
+                # Not a soft drink - skip variant setting
+                skipped_edits.append({"item": item_head, "reason": "variant_not_applicable"})
+                print(f"DEBUG: Stage-2 skipped variant '{variant}' for '{ing_name}' (not a soft drink)")
+
+    # Step 4: Emit metrics (partial success model)
+    total_changes = changed_count + variant_count + added_count
+    parse_ok = total_changes > 0
+
+    print(f"METRICS: {json.dumps({'event': 'qa_quantity_parse', 'method': parse_method, 'ok': parse_ok, 'items': len(all_edits)})}")
+    print(f"METRICS: {json.dumps({'event': 'qa_quantity_applied_partial', 'applied': total_changes, 'skipped': len(skipped_edits)})}")
+    print(f"METRICS: {json.dumps({'event': 'qa_quantity_changed', 'changed': changed_count, 'variant': variant_count, 'added': added_count, 'total': len(ingredients)})}")
+    print(f"METRICS: {json.dumps({'event': 'qa_quantity_match_map', 'map': match_map})}")
+
+    # Build user message (partial success feedback)
+    if total_changes == 0 and skipped_edits:
+        # Everything was skipped
+        skipped_items = [e["item"] for e in skipped_edits]
+        return {
+            "ok": False,
+            "ingredients": ingredients,
+            "applied_count": 0,
+            "message": f"Couldn't match: {', '.join(skipped_items[:3])}. Try exact ingredient names.",
             "match_map": match_map
         }
+
+    # Build success message with applied changes
+    action_parts = []
+    if changed_count > 0:
+        action_parts.append(f"{changed_count} portion(s) updated")
+    if variant_count > 0:
+        action_parts.append(f"{variant_count} variant(s) set")
+    if added_count > 0:
+        action_parts.append(f"{added_count} item(s) added")
+
+    message = "Applied: " + ", ".join(action_parts)
+
+    # Add soft warning if some edits were skipped
+    if skipped_edits:
+        skipped_items = [e["item"] for e in skipped_edits[:2]]  # Show max 2
+        message += f". Couldn't parse: {', '.join(skipped_items)}"
+        if len(skipped_edits) > 2:
+            message += f" (+{len(skipped_edits) - 2} more)"
 
     return {
         "ok": True,
         "ingredients": ingredients,
-        "applied_count": changed_count,
-        "message": f"Updated {changed_count} ingredient(s)",
-        "match_map": match_map
+        "applied_count": total_changes,
+        "message": message,
+        "match_map": match_map,
+        "skipped_count": len(skipped_edits)
     }
+
+
+def _extract_head_term(ingredient_name: str) -> str:
+    """
+    Extract head term from ingredient name using base-before-parens logic.
+
+    Examples:
+        "potato fries (large)" -> "fries"
+        "cola (diet)" -> "cola"
+        "rice" -> "rice"
+    """
+    # Remove parenthetical content
+    base = ingredient_name.split('(')[0].strip()
+
+    # Normalize and get tokens
+    tokens = base.lower().split()
+
+    if not tokens:
+        return ingredient_name.lower()
+
+    # Return last meaningful token (usually the head noun)
+    return tokens[-1] if len(tokens) > 1 else tokens[0]
+
+
+def _safe_match_ingredient(item_head: str, ingredients: List[Dict[str, Any]], ordinal: int = None) -> tuple[Dict[str, Any] | None, float]:
+    """
+    Safely match item_head to an ingredient using Jaccard similarity.
+    Prevents loose "in" matching that caused dal->daliya bug.
+
+    Args:
+        item_head: Normalized item name from user edit
+        ingredients: List of ingredient dicts
+        ordinal: Optional 1-based index for disambiguation (e.g., "cola #2" -> ordinal=2)
+
+    Returns:
+        Tuple of (matched_ingredient, confidence_score) or (None, 0.0)
+    """
+    from .normalize import normalize_for_matching
+
+    item_head_normalized = normalize_for_matching(item_head)
+    item_head_tokens = set(item_head_normalized.split())
+
+    # Check if item_head is very short (≤3 chars) - require exact match
+    is_short_token = len(item_head_normalized) <= 3
+
+    candidates = []
+
+    for idx, ing in enumerate(ingredients):
+        ing_name = ing.get('name', '')
+        ing_head = _extract_head_term(ing_name)
+        ing_normalized = normalize_for_matching(ing_head)
+        ing_tokens = set(ing_normalized.split())
+
+        # Exact head match
+        if item_head_normalized == ing_normalized:
+            candidates.append((ing, 1.0, idx))
+            continue
+
+        # For short tokens (≤3 chars), skip fuzzy matching
+        if is_short_token:
+            continue
+
+        # Jaccard similarity
+        if item_head_tokens and ing_tokens:
+            overlap = item_head_tokens & ing_tokens
+            union = item_head_tokens | ing_tokens
+            jaccard = len(overlap) / len(union) if union else 0.0
+
+            # For short tokens, require higher threshold
+            threshold = 0.7 if len(item_head_normalized) <= 5 else 0.6
+
+            if jaccard >= threshold:
+                candidates.append((ing, jaccard, idx))
+
+    if not candidates:
+        return (None, 0.0)
+
+    # If ordinal specified, use it to pick the Nth match
+    if ordinal is not None and ordinal > 0:
+        # Filter candidates by same head term
+        head_term = item_head_normalized.split()[0] if item_head_normalized else ""
+        same_head_candidates = [
+            c for c in candidates
+            if normalize_for_matching(_extract_head_term(c[0].get('name', ''))).split()[0] == head_term
+        ]
+        if len(same_head_candidates) >= ordinal:
+            return (same_head_candidates[ordinal - 1][0], same_head_candidates[ordinal - 1][1])
+
+    # Otherwise, return best match if significantly better
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    best_match, best_score, _ = candidates[0]
+
+    if len(candidates) == 1 or (best_score - candidates[1][1] >= 0.1):
+        return (best_match, best_score)
+
+    # Multiple ambiguous matches - return None to avoid wrong update
+    return (None, 0.0)
 
 
 def _names_match(name1_normalized: str, name2_normalized: str) -> bool:
@@ -740,6 +1082,10 @@ def generate_final_calculation(chat_session: genai.ChatSession, available_tools:
         attribution = deterministic_result.get('attribution', [])
         print(f"DEBUG: Adding {len(attribution)} attribution entries to final JSON")
 
+        # Calculate portion heuristic rate for quality tracking
+        total_portions = sum(portion_metrics.values()) if portion_metrics else 0
+        heuristic_rate = (portion_metrics.get('category_heuristic', 0) / total_portions * 100) if total_portions > 0 else 0.0
+
         final_json_data = {
             "breakdown": breakdown_items,
             "attribution": attribution,
@@ -747,6 +1093,11 @@ def generate_final_calculation(chat_session: genai.ChatSession, available_tools:
                 "four_four_nine": validations.get("four_four_nine", {}),
                 "portion_warnings": validations.get("portion_warnings", [])
                 # Note: confidence score excluded from user output
+            },
+            # Internal tracking data (not shown to users)
+            "_internal": {
+                "portion_heuristic_rate": heuristic_rate,
+                "portion_metrics": portion_metrics
             }
         }
 

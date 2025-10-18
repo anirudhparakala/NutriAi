@@ -1,0 +1,56 @@
+{
+  "key": "vision:gemini-2.5-flash-lite:94636b1:image_hash=117ef389981b72f07959c628289a329c70bd3dd682e96c6a6171b3a2eb062250",
+  "value": {
+    "dish": "Chocolate smoothie",
+    "portion_guess_g": 400.0,
+    "ingredients": [
+      {
+        "id": "ing_dd400241",
+        "name": "chocolate smoothie",
+        "amount": null,
+        "unit": "g",
+        "source": "estimation",
+        "portion_label": "16 oz glass",
+        "notes": null,
+        "parent_id": null,
+        "container_type": null,
+        "fill_level": null,
+        "composition_ratios": null
+      }
+    ],
+    "critical_questions": [
+      {
+        "id": "smoothie_base",
+        "text": "What liquid base was used?",
+        "options": [
+          "whole milk",
+          "2% milk",
+          "skim milk",
+          "almond milk",
+          "soy milk",
+          "oat milk",
+          "water"
+        ],
+        "default": "2% milk",
+        "impact_score": 0.7,
+        "follow_up_prompt": null
+      },
+      {
+        "id": "smoothie_protein_powder",
+        "text": "Was protein powder added?",
+        "options": [
+          "yes",
+          "no"
+        ],
+        "default": "yes",
+        "impact_score": 0.6,
+        "follow_up_prompt": null
+      }
+    ],
+    "raw_model": {
+      "raw_text": "```json\n{\n  \"dish\": \"Chocolate smoothie\",\n  \"portion_guess_g\": 400,\n  \"ingredients\": [\n    {\n      \"name\": \"chocolate smoothie\",\n      \"amount\": null,\n      \"unit\": \"g\",\n      \"source\": \"estimation\",\n      \"portion_label\": \"16 oz glass\",\n      \"notes\": null\n    }\n  ],\n  \"critical_questions\": [\n    {\n      \"id\": \"smoothie_base\",\n      \"text\": \"What liquid base was used?\",\n      \"options\": [\n        \"whole milk\",\n        \"2% milk\",\n        \"skim milk\",\n        \"almond milk\",\n        \"soy milk\",\n        \"oat milk\",\n        \"water\"\n      ],\n      \"default\": \"2% milk\",\n      \"impact_score\": 0.7\n    },\n    {\n      \"id\": \"smoothie_protein_powder\",\n      \"text\": \"Was protein powder added?\",\n      \"options\": [\n        \"yes\",\n        \"no\"\n      ],\n      \"default\": \"yes\",\n      \"impact_score\": 0.6\n    },\n    {\n      \"id\": \"smoothie_sweetener\",\n      \"text\": \"Was a sweetener added?\",\n      \"options\": [\n        \"none\",\n        \"sugar\",\n        \"honey\",\n        \"maple syrup\",\n        \"artificial sweetener\"\n      ],\n      \"default\": \"none\",\n      \"impact_score\": 0.5\n    }\n  ]\n}\n```"
+    }
+  },
+  "ttl": 259200,
+  "created_at": 1760749274.2639258
+}

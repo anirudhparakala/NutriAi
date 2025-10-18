@@ -7,6 +7,8 @@ import io
 import logging
 import sys
 import os
+import hashlib
+import time
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -170,6 +172,14 @@ def main():
         uploaded_file = st.file_uploader("Upload an image of your meal...", type=["jpg", "jpeg", "png"])
         if uploaded_file:
             st.session_state.uploaded_image_data = uploaded_file.getvalue()
+            # Compute image hash for replay/tracking
+            st.session_state.image_hash = hashlib.sha256(st.session_state.uploaded_image_data).hexdigest()
+            # Start timing
+            st.session_state.start_time = time.time()
+            # Initialize tracking flags
+            st.session_state.stage1_ok = True
+            st.session_state.stage2_shown = False
+            st.session_state.stage2_changed = False
             st.session_state.analysis_stage = "analyzing"
             st.rerun()
 
@@ -436,6 +446,7 @@ def main():
                     if "stage2_question" in response_data:
                         # Store Stage-2 question and go to Stage-2 QA mode
                         st.session_state.stage2_question = response_data["stage2_question"]
+                        st.session_state.stage2_shown = True  # Track that Stage-2 was shown
                         st.session_state.analysis_stage = "stage2_qa"
                         st.rerun()
                         return  # Don't continue to results
@@ -478,10 +489,10 @@ def main():
         # If user wants to adjust, show text area with hint
         adjustment_text = ""
         if selected_option == "I want to adjust":
-            st.caption(follow_up)
+            st.caption("You can type things like: `large fries, diet cola` or `rice 2 cups; dal 0.5 cup`")
             adjustment_text = st.text_area(
                 "Your adjustments:",
-                placeholder="rice 2 cups; dal 0.5 cup",
+                placeholder="large fries, diet cola",
                 key="stage2_adjustment",
                 height=80,
                 label_visibility="collapsed"
@@ -495,11 +506,13 @@ def main():
                     "qty_confirm": adjustment_text,
                     "checksum": checksum
                 }
+                st.session_state.stage2_changed = True  # Track that user made adjustments
             else:
                 st.session_state.stage2_answer = {
                     "qty_confirm": selected_option,
                     "checksum": checksum
                 }
+                st.session_state.stage2_changed = False  # User said "Looks right"
 
             # Directly trigger final calculation with the Stage-2 answer
             with st.spinner("Calculating final nutrition breakdown..."):
@@ -542,6 +555,15 @@ def main():
 
                 # Success - store response and go to results
                 st.session_state.final_analysis = final_response
+
+                # Extract internal tracking data for database logging
+                try:
+                    response_data = json.loads(final_response)
+                    if "_internal" in response_data:
+                        st.session_state.portion_heuristic_rate = response_data["_internal"].get("portion_heuristic_rate", 0.0)
+                except Exception:
+                    pass  # Not critical if extraction fails
+
                 st.session_state.analysis_stage = "results"
                 st.rerun()
 
@@ -574,6 +596,7 @@ def main():
                 validations: Optional[Validations] = None
                 explanation: Optional[str] = None
                 follow_up_question: Optional[str] = None
+                _internal: Optional[dict] = None  # Internal tracking data
 
             parsed_data, errors = parse_or_repair_json(raw_text, FinalBreakdownModel)
 
@@ -675,24 +698,62 @@ def main():
             col3.metric("Total Carbs", f"{round(total_carbs)}g")
             col4.metric("Total Fat", f"{round(total_fat)}g")
 
-            # Log successful session to database with model metadata
+            # Log successful session to database with quality tracking
             if st.session_state.vision_estimate and not st.session_state.get("session_logged", False):
                 try:
                     # Add model metadata to session log
                     metadata = get_session_metadata()
                     print(f"INFO: Logging session with metadata: {metadata}")
 
+                    # Calculate runtime
+                    run_ms = None
+                    if st.session_state.get("start_time"):
+                        run_ms = int((time.time() - st.session_state.start_time) * 1000)
+
+                    # Extract portion metrics from validations if available
+                    portion_heuristic_rate = None
+                    if validations and validations.get('summary'):
+                        summary = validations['summary']
+                        # Calculate heuristic rate from item-level data if available
+                        # For now, we'll set this in generate_final_calculation and pass via session_state
+                        portion_heuristic_rate = st.session_state.get('portion_heuristic_rate')
+
+                    # Prepare breakdown items for session_items table
+                    breakdown_items_for_db = []
+                    for item in breakdown_list:
+                        # Find matching attribution
+                        item_name = item.get('item', 'N/A')
+                        fdc_id = attribution_map.get(item_name.lower())
+
+                        breakdown_items_for_db.append({
+                            'name': item_name,
+                            'grams': item.get('calories', 0) / 4,  # Rough estimate if not available
+                            'fdc_id': fdc_id,
+                            'portion_source': 'portion-resolver',  # Default, ideally from breakdown
+                            'category': None,  # Could extract from breakdown if available
+                            'warnings': []
+                        })
+
                     session_id = db.log_session(
                         estimate=st.session_state.vision_estimate,
                         refinements=st.session_state.get("refinements", []),
                         final_json=raw_text,
                         tool_calls_count=st.session_state.get("tool_calls_count", 0),
-                        metadata=metadata  # Pass model name, prompt version, config
+                        metadata=metadata,
+                        image_hash=st.session_state.get("image_hash"),
+                        run_ms=run_ms,
+                        stage1_ok=st.session_state.get("stage1_ok", True),
+                        stage2_shown=st.session_state.get("stage2_shown", False),
+                        stage2_changed=st.session_state.get("stage2_changed", False),
+                        portion_heuristic_rate=portion_heuristic_rate,
+                        breakdown_items=breakdown_items_for_db
                     )
                     st.session_state.session_logged = True
-                    st.caption(f"📊 Session logged (ID: {session_id}, model: {metadata['model_name']}, version: {metadata['prompt_version']})")
+                    st.caption(f"📊 Session logged (ID: {session_id}, hash: {st.session_state.get('image_hash', 'N/A')[:8]}..., runtime: {run_ms}ms)")
                 except Exception as e:
                     print(f"Failed to log session: {e}")
+                    import traceback
+                    traceback.print_exc()
 
         except (ValueError, json.JSONDecodeError) as e:
             st.error(f"Could not parse the final analysis. Error: {e}", icon="🤷")

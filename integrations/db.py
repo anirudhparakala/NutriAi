@@ -5,7 +5,7 @@ import os
 from typing import List, Dict, Optional
 
 DB_PATH = "nutri_ai.db"
-SCHEMA_VERSION = 3  # Bump this when making schema changes
+SCHEMA_VERSION = 4  # Bump this when making schema changes
 
 
 def get_schema_version(con):
@@ -76,6 +76,59 @@ def migrate_schema(con):
         except sqlite3.OperationalError as e:
             print(f"Migration 3 skipped or already applied: {e}")
             set_schema_version(con, 3)
+
+    if current_version < 4:
+        # Migration 4: Quality tracking and analytics fields
+        print("Running migration 4: Adding quality tracking fields")
+        try:
+            # Add quality tracking columns to sessions
+            cur.execute("ALTER TABLE sessions ADD COLUMN validated BOOLEAN DEFAULT 0")
+            cur.execute("ALTER TABLE sessions ADD COLUMN notes TEXT")
+            cur.execute("ALTER TABLE sessions ADD COLUMN image_hash TEXT")
+            cur.execute("ALTER TABLE sessions ADD COLUMN run_ms INTEGER")
+            cur.execute("ALTER TABLE sessions ADD COLUMN stage1_ok BOOLEAN DEFAULT 1")
+            cur.execute("ALTER TABLE sessions ADD COLUMN stage2_shown BOOLEAN DEFAULT 0")
+            cur.execute("ALTER TABLE sessions ADD COLUMN stage2_changed BOOLEAN DEFAULT 0")
+            cur.execute("ALTER TABLE sessions ADD COLUMN portion_heuristic_rate REAL")
+
+            # Create indices for analytics queries
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_prompt ON sessions(prompt_version)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_image ON sessions(image_hash)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_validated ON sessions(validated)")
+
+            # Create session_items table for item-level tracking
+            cur.execute("""CREATE TABLE IF NOT EXISTS session_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                grams REAL,
+                fdc_id INTEGER,
+                portion_source TEXT,
+                category TEXT,
+                warnings_json TEXT,
+                created_at REAL NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions (id)
+            )""")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_session_items_session ON session_items(session_id)")
+
+            # Create golden_labels table for accuracy measurement
+            cur.execute("""CREATE TABLE IF NOT EXISTS golden_labels (
+                image_hash TEXT PRIMARY KEY,
+                kcal_min INTEGER,
+                kcal_max INTEGER,
+                protein_min INTEGER,
+                protein_max INTEGER,
+                notes TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )""")
+
+            con.commit()
+            set_schema_version(con, 4)
+            print("Migration 4 complete")
+        except sqlite3.OperationalError as e:
+            print(f"Migration 4 skipped or already applied: {e}")
+            set_schema_version(con, 4)
 
     print(f"Database schema is at version {SCHEMA_VERSION}")
 
@@ -160,9 +213,11 @@ def init():
         init._already_logged = True
 
 
-def log_session(estimate, refinements=None, final_json=None, tool_calls_count=0, metadata=None) -> int:
+def log_session(estimate, refinements=None, final_json=None, tool_calls_count=0, metadata=None,
+                image_hash=None, run_ms=None, stage1_ok=True, stage2_shown=False,
+                stage2_changed=False, portion_heuristic_rate=None, breakdown_items=None) -> int:
     """
-    Log a complete analysis session.
+    Log a complete analysis session with quality tracking fields.
 
     Args:
         estimate: VisionEstimate object from initial analysis
@@ -170,6 +225,13 @@ def log_session(estimate, refinements=None, final_json=None, tool_calls_count=0,
         final_json: Final JSON breakdown string (optional)
         tool_calls_count: Number of tool calls made during session
         metadata: Dict with model_name, prompt_version, generation_config (optional)
+        image_hash: Hash of uploaded image for replay (optional)
+        run_ms: Total runtime in milliseconds (optional)
+        stage1_ok: Whether Stage-1 QA succeeded (default True)
+        stage2_shown: Whether Stage-2 quantity check was shown (default False)
+        stage2_changed: Whether user made Stage-2 changes (default False)
+        portion_heuristic_rate: Ratio of heuristic portions (0.0-1.0) (optional)
+        breakdown_items: List of final breakdown items for session_items table (optional)
 
     Returns:
         Session ID of the logged session
@@ -208,12 +270,13 @@ def log_session(estimate, refinements=None, final_json=None, tool_calls_count=0,
         if generation_config:
             generation_config_json = json.dumps(generation_config)
 
-    # Insert session record
+    # Insert session record with quality tracking fields
     cur.execute("""INSERT INTO sessions
                    (created_at, dish, portion_guess_g, ingredients_json, refinements_json,
                     final_json, confidence_score, tool_calls_count,
-                    model_name, prompt_version, generation_config_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+                    model_name, prompt_version, generation_config_json,
+                    image_hash, run_ms, stage1_ok, stage2_shown, stage2_changed, portion_heuristic_rate)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
         time.time(),
         estimate.dish,
         estimate.portion_guess_g,
@@ -224,7 +287,13 @@ def log_session(estimate, refinements=None, final_json=None, tool_calls_count=0,
         tool_calls_count,
         model_name,
         prompt_version,
-        generation_config_json
+        generation_config_json,
+        image_hash,
+        run_ms,
+        stage1_ok,
+        stage2_shown,
+        stage2_changed,
+        portion_heuristic_rate
     ))
 
     session_id = cur.lastrowid
@@ -256,10 +325,41 @@ def log_session(estimate, refinements=None, final_json=None, tool_calls_count=0,
                         time.time()
                     ))
 
+    # Log breakdown items to session_items table (if provided)
+    if breakdown_items:
+        for item in breakdown_items:
+            # Extract fields from breakdown item
+            item_name = item.get('name', '')
+            item_grams = item.get('grams', item.get('amount'))  # Support both field names
+            item_fdc_id = item.get('fdc_id')
+            item_portion_source = item.get('portion_source')
+            item_category = item.get('category')
+
+            # Collect warnings if any
+            warnings = []
+            if item.get('warnings'):
+                warnings = item['warnings']
+            warnings_json = json.dumps(warnings) if warnings else None
+
+            cur.execute("""INSERT INTO session_items
+                           (session_id, name, grams, fdc_id, portion_source, category, warnings_json, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", (
+                session_id,
+                item_name,
+                item_grams,
+                item_fdc_id,
+                item_portion_source,
+                item_category,
+                warnings_json,
+                time.time()
+            ))
+
     con.commit()
     con.close()
 
     print(f"Logged session {session_id}: '{estimate.dish}' with confidence {confidence_score:.2f}")
+    if breakdown_items:
+        print(f"  Logged {len(breakdown_items)} items to session_items table")
     return session_id
 
 
@@ -562,3 +662,71 @@ def update_portion_prior(portion_class: str, base_label: str, grams_per_unit: fl
 
     con.commit()
     con.close()
+
+
+# ============================================================================
+# Analytics & Quality Tracking Functions (Migration 4+)
+# ============================================================================
+
+def get_baseline_health():
+    """Get baseline health metrics by prompt version."""
+    if not os.path.exists(DB_PATH):
+        return []
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("""
+        SELECT prompt_version, COUNT(*) AS sessions,
+               ROUND(AVG(confidence_score), 2) AS avg_conf,
+               ROUND(AVG(portion_heuristic_rate), 2) AS avg_heuristic_rate
+        FROM sessions WHERE prompt_version IS NOT NULL
+        GROUP BY prompt_version ORDER BY sessions DESC
+    """)
+    results = [{"prompt_version": r[0], "sessions": r[1], "avg_confidence": r[2], "avg_heuristic_rate": r[3]} for r in cur.fetchall()]
+    con.close()
+    return results
+
+def get_stage2_effectiveness(prompt_version=None):
+    """Calculate Stage-2 effectiveness metrics."""
+    if not os.path.exists(DB_PATH):
+        return {"shown": 0, "changed": 0, "pct_changed": 0.0}
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    if prompt_version:
+        cur.execute("SELECT SUM(CASE WHEN stage2_shown THEN 1 ELSE 0 END), SUM(CASE WHEN stage2_changed THEN 1 ELSE 0 END) FROM sessions WHERE prompt_version = ?", (prompt_version,))
+    else:
+        cur.execute("SELECT SUM(CASE WHEN stage2_shown THEN 1 ELSE 0 END), SUM(CASE WHEN stage2_changed THEN 1 ELSE 0 END) FROM sessions")
+    row = cur.fetchone()
+    shown, changed = row[0] or 0, row[1] or 0
+    con.close()
+    return {"shown": shown, "changed": changed, "pct_changed": round(100.0 * changed / shown, 1) if shown > 0 else 0.0}
+
+def add_golden_label(image_hash, kcal_min, kcal_max, notes=None, protein_min=None, protein_max=None):
+    """Add or update golden label for accuracy measurement."""
+    if not os.path.exists(DB_PATH):
+        init()
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    now = time.time()
+    cur.execute("""
+        INSERT INTO golden_labels (image_hash, kcal_min, kcal_max, protein_min, protein_max, notes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(image_hash) DO UPDATE SET
+        kcal_min=excluded.kcal_min, kcal_max=excluded.kcal_max, protein_min=excluded.protein_min,
+        protein_max=excluded.protein_max, notes=excluded.notes, updated_at=excluded.updated_at
+    """, (image_hash, kcal_min, kcal_max, protein_min, protein_max, notes, now, now))
+    con.commit()
+    con.close()
+    print(f"Added/updated golden label for image {image_hash[:8]}... ({kcal_min}-{kcal_max} kcal)")
+
+def validate_session(session_id, notes=None):
+    """Mark session as validated."""
+    if not os.path.exists(DB_PATH):
+        return
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    if notes:
+        cur.execute("UPDATE sessions SET validated = 1, notes = ? WHERE id = ?", (notes, session_id))
+    else:
+        cur.execute("UPDATE sessions SET validated = 1 WHERE id = ?", (session_id,))
+    con.commit()
+    con.close()
+    print(f"Marked session {session_id} as validated")

@@ -78,6 +78,53 @@ def normalize_with_web(name: str, search_fn) -> str:
     return base
 
 
+def canonicalize_name(name: str) -> str:
+    """
+    Canonicalize ingredient names with generic aliases (FIX E).
+    Converts common variants to database-friendly names without brand specificity.
+
+    Args:
+        name: Raw ingredient name from user input
+
+    Returns:
+        Canonicalized name suitable for USDA lookup
+
+    Examples:
+        "whey protein" -> "protein powder (whey)"
+        "protein shake powder" -> "protein powder"
+        "skim milk" -> "milk (nonfat)"
+        "2% milk" -> "milk (2%)"
+    """
+    name_lower = name.lower().strip()
+
+    # Protein powder aliases
+    if "whey protein" in name_lower or "whey" in name_lower:
+        return "protein powder (whey)"
+    if "protein shake powder" in name_lower or "protein mix" in name_lower:
+        return "protein powder"
+    if "casein" in name_lower:
+        return "protein powder (casein)"
+
+    # Milk variants
+    if "skim milk" in name_lower or "fat free milk" in name_lower:
+        return "milk (nonfat)"
+    if "2% milk" in name_lower:
+        return "milk (2%)"
+    if "whole milk" in name_lower:
+        return "milk (whole)"
+    if "1% milk" in name_lower:
+        return "milk (1%)"
+
+    # Oil aliases
+    if "olive oil" in name_lower:
+        return "oil (olive)"
+    if "vegetable oil" in name_lower:
+        return "oil (vegetable)"
+
+    # Otherwise, apply minimal normalization
+    return _minimal_normalize(name)
+
+
 def normalize_ingredient_list(ingredients: list, search_fn=None) -> list:
     """
     Normalize a list of ingredients, applying web search normalization selectively.

@@ -1,0 +1,80 @@
+{
+  "key": "vision:gemini-2.5-flash-lite:94636b1:image_hash=aab599be3920a462ea02f5a80afb2cf579d4a42b9a51271c3e279e65ca96748c",
+  "value": {
+    "dish": "McDonald's Cheeseburger Meal",
+    "portion_guess_g": 700.0,
+    "ingredients": [
+      {
+        "id": "ing_2b33e2c6",
+        "name": "cheeseburger",
+        "amount": null,
+        "unit": "g",
+        "source": "estimation",
+        "portion_label": "single",
+        "notes": "McDonald\\'s",
+        "parent_id": null,
+        "container_type": null,
+        "fill_level": null,
+        "composition_ratios": null
+      },
+      {
+        "id": "ing_f592e487",
+        "name": "potato fries",
+        "amount": null,
+        "unit": "g",
+        "source": "estimation",
+        "portion_label": "small",
+        "notes": "McDonald\\'s",
+        "parent_id": null,
+        "container_type": null,
+        "fill_level": null,
+        "composition_ratios": null
+      },
+      {
+        "id": "ing_84943eaf",
+        "name": "cola",
+        "amount": null,
+        "unit": "g",
+        "source": "estimation",
+        "portion_label": "regular",
+        "notes": "McDonald\\'s",
+        "parent_id": null,
+        "container_type": null,
+        "fill_level": null,
+        "composition_ratios": null
+      }
+    ],
+    "critical_questions": [
+      {
+        "id": "fries_size",
+        "text": "What size are the fries?",
+        "options": [
+          "small",
+          "medium",
+          "large"
+        ],
+        "default": "small",
+        "impact_score": 0.8,
+        "follow_up_prompt": null
+      },
+      {
+        "id": "drink_variant",
+        "text": "What type of drink is it?",
+        "options": [
+          "cola",
+          "diet cola",
+          "water",
+          "other"
+        ],
+        "default": "cola",
+        "impact_score": 0.7,
+        "follow_up_prompt": null
+      }
+    ],
+    "raw_model": {
+      "raw_text": "I need more information to accurately estimate the nutritional content. Please provide details about the specific items, such as the type of burger, the size of the fries and drink, and any customizations.\n"
+    }
+  },
+  "ttl": 259200,
+  "created_at": 1760749226.3770876
+}

@@ -62,7 +62,9 @@ SCOOP_SIZES = {
     "protein powder": 30,  # standard scoop
     "whey": 30,
     "casein": 30,
+    "isolate": 30,  # whey isolate, etc.
     "plant protein": 30,
+    "pea protein": 30,
     "default": 30,
 }
 
