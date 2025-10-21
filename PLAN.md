@@ -40,20 +40,65 @@
 
 ---
 
-## **Phase 2 — Database & Whoop Integration**
+## **Phase 2 — Database Quality Tracking**
 
-**Goal:** Add persistence + biometrics layer.
+**Goal:** Transform database from passive data lake to active feedback loop.
 
-* **SQLite Schema**
+* **Schema Migration 4**
 
-  * `meals`: nutrition breakdown logs.
-  * `whoop_daily`: fitness/recovery metrics.
+  * Add quality tracking fields to `sessions` table (validated, image_hash, run_ms, stage1_ok, stage2_shown, stage2_changed, portion_heuristic_rate).
+  * Create `session_items` table for per-ingredient tracking.
+  * Create `golden_labels` table for accuracy measurement.
+
+* **Analytics Functions**
+
+  * Baseline health comparison by prompt version.
+  * Stage-2 effectiveness measurement.
+  * Portion heuristic rate tracking.
+
+* **Stage-2 Parser Improvements**
+
+  * Deterministic-first parsing (regex + lexicons).
+  * Partial success model (apply what works, warn about rest).
+  * Safe ingredient matching (fixes dal→daliya bug).
+  * Variant handling for beverages (diet/zero/light).
+
+---
+
+## **Phase 2.5 — Analytics Dashboard & Database Chatbot**
+
+**Goal:** Provide visual insights and conversational access to logged nutrition data.
+
+* **Analytics Dashboard**
+
+  * **Today's Summary**: Real-time macro breakdown (pie chart) for meals logged today.
+  * **Date Selector**: View historical food intake for any past date.
+  * **Macro Visualizations**: Daily totals (calories, protein, carbs, fat) with charts.
+  * **Meal History**: Chronological list of logged meals with thumbnails and summaries.
+
+* **Database Chatbot**
+
+  * **Natural Language Queries**: Ask questions about nutrition patterns ("How much % carbs am I having in general?").
+  * **Database-Backed Answers**: All responses grounded in actual logged data (no hallucinations).
+  * **Metric Functions**: Atomic functions for common queries (avg intake, macro ratios, date ranges).
+  * **OpenAI Integration**: Use OpenAI API for query understanding and natural language generation.
+
+---
+
+## **Phase 3 — WHOOP Integration & Biometrics**
+
+**Goal:** Add biometrics layer for comprehensive health tracking.
+
+* **SQLite Schema Extensions**
+
+  * `whoop_daily`: fitness/recovery metrics (burned kcal, HRV, sleep, recovery, strain).
   * `user_metrics`: weight, goals, notes.
 
-* **Whoop API Integration**
+* **WHOOP API Integration**
 
-  * `/whoop/sync` → fetch daily stats (burned kcal, HRV, sleep, recovery, strain).
-  * Insert into `whoop_daily`.
+  * OAuth authentication flow.
+  * `/whoop/sync` → fetch daily stats.
+  * Insert into `whoop_daily` table.
 
 * **Insight Layer (lightweight)**
 
@@ -62,50 +107,20 @@
 
 ---
 
-## **Phase 3 — Intelligent Insights**
+## **Phase 4 — Intelligent Insights (with WHOOP)**
 
-**Goal:** Automated, AI-driven daily coaching.
+**Goal:** Automated, AI-driven daily coaching combining nutrition + biometrics.
 
 * **Daily Insights Prompt**
 
-  * Gemini sees combined data (meals + whoop + goals).
-  * Generates 5 insights that merge food + recovery context (e.g., “yesterday overate → burn 400 more today”).
+  * LLM sees combined data (meals + whoop + goals).
+  * Generates 5 insights that merge food + recovery context (e.g., "yesterday overate → burn 400 more today").
 
 * **Trend Analysis**
 
   * Rolling averages (7-day intake vs expenditure).
   * Correlations (sleep/HRV ↔ macros).
   * Goal-aware nudges (cut/bulk/maintain stored in DB).
-
----
-
-## **Phase 4 — Chatbot Layer**
-
-**Goal:** Conversational access to logged data with **query decomposition**.
-
-* **Metric Registry (atomic functions)**
-
-  * Define \~15 metrics (e.g., `calorie_intake(days)`, `burn(days)`, `balance(days)`, `avg_protein(days)`, `deficit_series(days)`, `goal()`, `set_goal()`).
-  * Each metric is deterministic, tested, and safe.
-
-* **LLM Planner Role**
-
-  * User asks natural question.
-  * LLM decomposes into **metric function calls** + operators (filter, group, avg).
-  * Example: *“What’s my average deficit last 2 weeks?”* → `balance(14)/14`.
-
-* **Fallback Ladder**
-
-  1. Reformulate to nearest known metric.
-  2. Ask at most one clarifying question (time window, goal, etc.).
-  3. Partial answer with disclosure (“2 missing days in window”).
-  4. Explicit can’t-answer if DB data missing.
-
-* **AI Narration**
-
-  * Gemini contextualizes numbers → natural language output.
-  * No invented numbers — always backed by DB functions.
-  * Transparent: states time window, assumptions, defaults.
 
 ---
 

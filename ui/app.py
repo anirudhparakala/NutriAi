@@ -151,12 +151,9 @@ def display_vision_estimate(estimate: VisionEstimate) -> str:
     return display_text
 
 
-def main():
-    load_css()
+def show_upload_page():
+    """Main upload and analysis page (existing functionality)."""
     st.title("Intelligent AI Calorie Estimator 🧠")
-
-    # Initialize database for logging
-    db.init()
 
     if "analysis_stage" not in st.session_state:
         st.session_state.analysis_stage = "upload"
@@ -764,6 +761,317 @@ def main():
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
+
+def show_dashboard():
+    """Analytics dashboard with charts and historical views."""
+    from integrations import analytics
+    from datetime import datetime
+    import plotly.graph_objects as go
+    import pandas as pd
+
+    st.title("📊 Nutrition Dashboard")
+
+    # Today's Summary Section
+    st.markdown("### Today's Summary")
+    st.markdown(f"**{datetime.now().strftime('%A, %B %d, %Y')}**")
+
+    totals = analytics.get_today_totals()
+
+    # Metric cards
+    col1, col2 = st.columns(2)
+    col1.metric("Total Calories", f"{int(totals['calories']):,}")
+    col2.metric("Meals Logged", f"{totals['meal_count']}")
+
+    # Macro breakdown pie chart
+    if totals['meal_count'] > 0:
+        st.markdown("#### Macro Breakdown")
+
+        percentages = analytics.get_macro_percentages(totals)
+
+        # Professional color scheme (blacks, greys, whites)
+        fig = go.Figure(data=[go.Pie(
+            labels=['Protein', 'Carbs', 'Fat'],
+            values=[percentages['protein_pct'], percentages['carbs_pct'], percentages['fat_pct']],
+            hole=0.4,  # Donut chart
+            marker=dict(
+                colors=['#495057', '#ADB5BD', '#6C757D'],  # Dark grey, medium grey, slate grey
+                line=dict(color='#FFFFFF', width=2)
+            ),
+            textfont=dict(size=14, color='#212529'),
+            hovertemplate='<b>%{label}</b><br>%{value:.1f}%<br>%{customdata:.0f}g<extra></extra>',
+            customdata=[totals['protein'], totals['carbs'], totals['fat']]
+        )])
+
+        fig.update_layout(
+            showlegend=True,
+            height=400,
+            legend=dict(
+                font=dict(size=14, color='#212529')
+            ),
+            margin=dict(t=20, b=20, l=20, r=20),
+            paper_bgcolor='#F8F9FA',
+            plot_bgcolor='#F8F9FA',
+            font=dict(family='Arial, sans-serif', size=12, color='#212529')
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Gram totals
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Protein", f"{int(totals['protein'])}g")
+        col2.metric("Carbs", f"{int(totals['carbs'])}g")
+        col3.metric("Fat", f"{int(totals['fat'])}g")
+
+    else:
+        # Empty state
+        st.info("📭 **No meals logged yet today**\n\n💡 Tip: Navigate to '📸 Upload Food' to start tracking your nutrition!", icon="📭")
+
+    st.divider()
+
+    # Today's Meals List
+    if totals['meal_count'] > 0:
+        st.markdown("### Today's Meals")
+
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        meals = analytics.get_meals_by_date(today_str)
+
+        for meal in meals:
+            with st.expander(f"🕐 {meal['time']} - {meal['dish']} ({int(meal['calories'])} kcal)"):
+                st.markdown(f"**Macros:** {int(meal['protein'])}g protein • {int(meal['carbs'])}g carbs • {int(meal['fat'])}g fat")
+
+                # Show breakdown if available
+                if meal.get('breakdown'):
+                    st.markdown("**Ingredients:**")
+                    for item in meal['breakdown']:
+                        st.caption(f"• {item.get('item', 'Unknown')}: {item.get('calories', 0)} kcal")
+
+    st.divider()
+
+    # Historical View Section
+    st.markdown("### 📅 Historical View")
+
+    selected_date = st.date_input(
+        "Select a date to view:",
+        value=datetime.now(),
+        max_value=datetime.now(),
+        help="View meals from any past date"
+    )
+
+    selected_date_str = selected_date.strftime('%Y-%m-%d')
+    today_str = datetime.now().strftime('%Y-%m-%d')
+
+    # Only show historical data if different from today
+    if selected_date_str != today_str:
+        st.markdown(f"#### {selected_date.strftime('%A, %B %d, %Y')}")
+
+        historical_meals = analytics.get_meals_by_date(selected_date_str)
+
+        if historical_meals:
+            # Calculate totals for selected date
+            hist_calories = sum(m['calories'] for m in historical_meals)
+            hist_protein = sum(m['protein'] for m in historical_meals)
+            hist_carbs = sum(m['carbs'] for m in historical_meals)
+            hist_fat = sum(m['fat'] for m in historical_meals)
+
+            # Metrics
+            col1, col2 = st.columns(2)
+            col1.metric("Calories", f"{int(hist_calories):,}")
+            col2.metric("Meals", f"{len(historical_meals)}")
+
+            # Macro pie chart
+            hist_percentages = analytics.get_macro_percentages({
+                'protein': hist_protein,
+                'carbs': hist_carbs,
+                'fat': hist_fat
+            })
+
+            fig_hist = go.Figure(data=[go.Pie(
+                labels=['Protein', 'Carbs', 'Fat'],
+                values=[hist_percentages['protein_pct'], hist_percentages['carbs_pct'], hist_percentages['fat_pct']],
+                hole=0.4,
+                marker=dict(
+                    colors=['#495057', '#ADB5BD', '#6C757D'],
+                    line=dict(color='#FFFFFF', width=2)
+                ),
+                textfont=dict(size=14, color='#212529')
+            )])
+
+            fig_hist.update_layout(
+                showlegend=True,
+                height=300,
+                legend=dict(
+                    font=dict(size=14, color='#212529')
+                ),
+                margin=dict(t=20, b=20, l=20, r=20),
+                paper_bgcolor='#F8F9FA',
+                plot_bgcolor='#F8F9FA'
+            )
+
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+            # Meals list
+            for meal in historical_meals:
+                with st.expander(f"🕐 {meal['time']} - {meal['dish']}"):
+                    st.markdown(f"**{int(meal['calories'])} kcal** • P: {int(meal['protein'])}g • C: {int(meal['carbs'])}g • F: {int(meal['fat'])}g")
+        else:
+            st.info(f"No meals logged on {selected_date.strftime('%B %d, %Y')}", icon="📭")
+
+    st.divider()
+
+    # 7-Day Trend Chart
+    st.markdown("### 📈 7-Day Trend")
+
+    days_with_data = analytics.get_days_with_data()
+
+    if days_with_data >= 3:
+        series = analytics.get_daily_calorie_series(days=7)
+
+        if series:
+            # Convert to DataFrame for easier plotting
+            df = pd.DataFrame(series, columns=['Date', 'Calories'])
+
+            fig_trend = go.Figure()
+            fig_trend.add_trace(go.Scatter(
+                x=df['Date'],
+                y=df['Calories'],
+                mode='lines+markers',
+                name='Daily Calories',
+                line=dict(color='#495057', width=3),
+                marker=dict(size=8, color='#6C757D')
+            ))
+
+            fig_trend.update_layout(
+                xaxis_title="Date",
+                yaxis_title="Calories",
+                height=300,
+                margin=dict(t=20, b=40, l=40, r=20),
+                paper_bgcolor='#F8F9FA',
+                plot_bgcolor='#FFFFFF',
+                font=dict(family='Arial, sans-serif', size=12, color='#212529'),
+                xaxis=dict(gridcolor='#DEE2E6'),
+                yaxis=dict(gridcolor='#DEE2E6')
+            )
+
+            st.plotly_chart(fig_trend, use_container_width=True)
+    else:
+        st.info(f"📊 **Trend chart will be available after logging meals for 3+ days.**\n\nCurrently: {days_with_data} day(s) logged. Keep going!", icon="📊")
+
+    st.divider()
+
+    # Weekly Comparison
+    st.markdown("### 📊 Weekly Comparison")
+
+    if days_with_data >= 14:
+        comparison = analytics.get_week_comparison()
+
+        if comparison['this_week_avg'] is not None and comparison['last_week_avg'] is not None:
+            delta = comparison['delta']
+            delta_text = f"+{int(delta)}" if delta > 0 else f"{int(delta)}"
+
+            col1, col2 = st.columns(2)
+            col1.metric("This Week Avg", f"{int(comparison['this_week_avg'])} cal")
+            col2.metric("Last Week Avg", f"{int(comparison['last_week_avg'])} cal", delta=f"{delta_text} cal")
+        else:
+            st.info("Not enough data for weekly comparison yet.", icon="📊")
+    else:
+        st.info(f"📈 **Weekly comparison available after 14 days of logging.**\n\nKeep logging! ({days_with_data}/14 days)", icon="📈")
+
+
+def show_chatbot():
+    """AI nutrition coach chatbot for querying historical data."""
+    from core.chatbot import NutritionChatbot
+
+    st.title("💬 Nutrition Chatbot")
+    st.markdown("Ask me anything about your nutrition history! I can analyze your eating patterns, compare time periods, and provide personalized recommendations.")
+
+    # Check for OpenAI API key
+    try:
+        openai_key = st.secrets["OPENAI_API_KEY"]
+        if openai_key == "your-openai-api-key-here":
+            st.error("⚠️ **OpenAI API key not configured**\n\nPlease add your OpenAI API key to `.streamlit/secrets.toml` to use the chatbot feature.", icon="⚠️")
+            st.code('OPENAI_API_KEY = "sk-..."', language="toml")
+            return
+    except KeyError:
+        st.error("⚠️ **OpenAI API key not found**\n\nPlease add `OPENAI_API_KEY` to your `.streamlit/secrets.toml` file.", icon="⚠️")
+        return
+
+    # Initialize chatbot in session state
+    if "chatbot" not in st.session_state:
+        st.session_state.chatbot = NutritionChatbot(api_key=openai_key, model="gpt-4o-mini")
+
+    if "chat_messages" not in st.session_state:
+        st.session_state.chat_messages = []
+
+    # Example questions
+    with st.expander("💡 Example Questions"):
+        st.markdown("""
+        - How many calories did I eat yesterday?
+        - What's my average protein intake over the last week?
+        - Am I eating enough protein for my bodyweight? (I weigh 70kg)
+        - What can I improve in my diet?
+        - Show me my highest calorie day this month
+        - How much of my calories come from McDonald's?
+        - Compare this week to last week
+        - What percentage of my diet is carbs?
+        - Which foods do I eat most frequently?
+        - Am I being consistent with tracking?
+        """)
+
+    # Display chat history
+    for message in st.session_state.chat_messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    # Chat input
+    if prompt := st.chat_input("Ask about your nutrition..."):
+        # Add user message to chat
+        st.session_state.chat_messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Get bot response
+        with st.chat_message("assistant"):
+            with st.spinner("Analyzing your data..."):
+                try:
+                    response = st.session_state.chatbot.chat(prompt)
+                    st.markdown(response)
+                    st.session_state.chat_messages.append({"role": "assistant", "content": response})
+                except Exception as e:
+                    error_msg = f"Sorry, I encountered an error: {str(e)}"
+                    st.error(error_msg)
+                    st.session_state.chat_messages.append({"role": "assistant", "content": error_msg})
+
+    # Clear conversation button
+    if len(st.session_state.chat_messages) > 0:
+        if st.button("Clear Conversation"):
+            st.session_state.chatbot.clear_history()
+            st.session_state.chat_messages = []
+            st.rerun()
+
+
+def main():
+    """Main app with multi-page navigation."""
+    load_css()
+
+    # Initialize database for logging
+    db.init()
+
+    # Sidebar navigation
+    st.sidebar.title("🍽️ Nutri AI")
+    page = st.sidebar.radio(
+        "Navigate",
+        ["📸 Upload Food", "📊 Dashboard", "💬 Chatbot"],
+        label_visibility="collapsed"
+    )
+
+    # Route to selected page
+    if page == "📸 Upload Food":
+        show_upload_page()
+    elif page == "📊 Dashboard":
+        show_dashboard()
+    elif page == "💬 Chatbot":
+        show_chatbot()
+
 
 if __name__ == "__main__":
     main()
