@@ -426,7 +426,7 @@ def _select_best_match(query: str, foods: List[Dict], must_tokens: Optional[Set[
     close_threshold = best_score * 0.9
     close_matches = [food for score, food in scored_foods if score >= close_threshold]
 
-    # If multiple close matches AND they're ambiguous, re   turn clarification metadata
+    # If multiple close matches AND they're ambiguous, return clarification metadata
     # Caller can decide to ask user or use tiebreaker
     if len(close_matches) > 1:
         # Check if matches are semantically different (e.g., "sweet potato fries" vs "fries")
