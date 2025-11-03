@@ -37,6 +37,20 @@ FUNCTION_DEFINITIONS = [
         }
     },
     {
+        "name": "get_macros_for_date",
+        "description": "Get complete nutrition breakdown (calories, protein, carbs, fat, fiber) for a specific date. Use this when user asks about 'what I ate yesterday', 'nutrition yesterday', 'macros today', or nutrition for any specific day. When user says 'yesterday', convert to actual date first using the dates provided in system prompt.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "description": "Date in YYYY-MM-DD format (e.g., '2025-01-20'). Convert natural language like 'yesterday' to actual date."
+                }
+            },
+            "required": ["date"]
+        }
+    },
+    {
         "name": "get_average_daily_calories",
         "description": "Get average daily calories over a date range",
         "parameters": {
@@ -509,6 +523,7 @@ FUNCTION_DEFINITIONS = [
 FUNCTION_MAP = {
     "get_most_recent_logged_date": metrics.get_most_recent_logged_date,
     "get_calories_for_date": metrics.get_calories_for_date,
+    "get_macros_for_date": metrics.get_macros_for_date,
     "get_average_daily_calories": metrics.get_average_daily_calories,
     "get_average_daily_macros": metrics.get_average_daily_macros,
     "get_macro_distribution": metrics.get_macro_distribution,
@@ -559,6 +574,8 @@ class NutritionChatbot:
         self.system_prompt = f"""You are an AI nutrition coach assistant with access to both nutrition tracking data and WHOOP physiological metrics. You help users optimize their nutrition based on how it affects their recovery, sleep, and performance.
 
 Current date: {datetime.now().strftime('%Y-%m-%d')}
+Yesterday: {(datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')}
+Day before yesterday: {(datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')}
 
 When users ask questions:
 1. Use the available functions to query their nutrition data
@@ -570,7 +587,12 @@ When users ask questions:
    - Fat: 20-30% of calories
 5. For bodyweight protein recommendations, use 1.6-2.2g per kg bodyweight for active individuals
 6. Be supportive and encouraging while providing honest feedback
-7. When dates are mentioned relatively (yesterday, last week, etc.), calculate the actual dates based on current date
+7. **IMPORTANT - Natural Language Dates**: When users mention dates naturally, convert them:
+   - "yesterday" → use the Yesterday date above
+   - "today" → use the Current date above
+   - "day before yesterday" / "2 days ago" → use Day before yesterday date above
+   - "last week" → calculate 7 days back from current date
+   - Always use YYYY-MM-DD format when calling functions
 
 **WHOOP Integration Capabilities:**
 8. Use WHOOP correlation functions to discover relationships between nutrition and physiological metrics:

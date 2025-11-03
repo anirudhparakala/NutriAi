@@ -48,6 +48,50 @@ def get_calories_for_date(date: str, validated_only: bool = True) -> float:
     return total_calories
 
 
+def get_macros_for_date(date: str, validated_only: bool = True) -> Optional[Dict[str, float]]:
+    """
+    Get complete macro breakdown for a specific date.
+
+    Args:
+        date: Date string in 'YYYY-MM-DD' format
+        validated_only: If True, only include validated sessions
+
+    Returns:
+        Dict with {calories, protein, carbs, fat, fiber} for that date (None if no data)
+    """
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+
+    # Use direct column sums instead of parsing JSON for better reliability
+    cur.execute(f"""
+        SELECT
+            SUM(kcal) as total_kcal,
+            SUM(protein_g) as total_protein,
+            SUM(carbs_g) as total_carbs,
+            SUM(fat_g) as total_fat,
+            SUM(fiber_g) as total_fiber
+        FROM sessions
+        WHERE DATE(created_at, 'unixepoch', 'localtime') = ?
+        AND kcal IS NOT NULL
+    """, (date,))
+
+    row = cur.fetchone()
+    con.close()
+
+    if not row or row[0] is None:
+        return None
+
+    totals = {
+        "calories": float(row[0]) if row[0] else 0.0,
+        "protein": float(row[1]) if row[1] else 0.0,
+        "carbs": float(row[2]) if row[2] else 0.0,
+        "fat": float(row[3]) if row[3] else 0.0,
+        "fiber": float(row[4]) if row[4] else 0.0
+    }
+
+    return totals
+
+
 def get_average_daily_calories(start_date: str, end_date: str, validated_only: bool = True) -> Optional[float]:
     """
     Get average daily calories over a date range.

@@ -10,6 +10,7 @@ import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import pandas as pd
+import numpy as np
 
 from integrations.db import DB_PATH
 
@@ -247,45 +248,28 @@ class NutritionWhoopBridge:
             end_date: End date (inclusive)
 
         Returns:
-            Dict with mean, median, min, max for each macro
+            Dict with mean, median, min, max for each macro (including derived features)
         """
         nutrition_df = self.get_daily_nutrition(start_date, end_date)
 
         if nutrition_df.empty:
             return {}
 
-        summary = {
-            "total_kcal": {
-                "mean": nutrition_df["total_kcal"].mean(),
-                "median": nutrition_df["total_kcal"].median(),
-                "min": nutrition_df["total_kcal"].min(),
-                "max": nutrition_df["total_kcal"].max(),
-            },
-            "total_protein": {
-                "mean": nutrition_df["total_protein"].mean(),
-                "median": nutrition_df["total_protein"].median(),
-                "min": nutrition_df["total_protein"].min(),
-                "max": nutrition_df["total_protein"].max(),
-            },
-            "total_carbs": {
-                "mean": nutrition_df["total_carbs"].mean(),
-                "median": nutrition_df["total_carbs"].median(),
-                "min": nutrition_df["total_carbs"].min(),
-                "max": nutrition_df["total_carbs"].max(),
-            },
-            "total_fat": {
-                "mean": nutrition_df["total_fat"].mean(),
-                "median": nutrition_df["total_fat"].median(),
-                "min": nutrition_df["total_fat"].min(),
-                "max": nutrition_df["total_fat"].max(),
-            },
-            "meal_count": {
-                "mean": nutrition_df["meal_count"].mean(),
-                "median": nutrition_df["meal_count"].median(),
-                "min": nutrition_df["meal_count"].min(),
-                "max": nutrition_df["meal_count"].max(),
-            },
-        }
+        # Add derived features to the nutrition data
+        nutrition_df = self._add_derived_features(nutrition_df)
+
+        # Get all numeric columns to summarize
+        numeric_cols = nutrition_df.select_dtypes(include=[np.number]).columns
+
+        summary = {}
+        for col in numeric_cols:
+            if col != 'meal_count':  # Skip meal_count as it's not a macro
+                summary[col] = {
+                    "mean": nutrition_df[col].mean(),
+                    "median": nutrition_df[col].median(),
+                    "min": nutrition_df[col].min(),
+                    "max": nutrition_df[col].max(),
+                }
 
         return summary
 

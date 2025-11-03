@@ -565,7 +565,9 @@ class WhoopAnalytics:
         ]
 
         # WHOOP variables to test (excluding strain since it's the control variable)
-        whoop_vars = ["recovery_score", "hrv", "rhr", "sleep_performance"]
+        # Mix of recovery, cardiovascular, and sleep metrics
+        whoop_vars = ["recovery_score", "hrv", "rhr", "sleep_performance",
+                      "sleep_efficiency", "sleep_duration_min", "calories_burned"]
 
         results = []
 

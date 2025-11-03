@@ -141,10 +141,10 @@ st.markdown("---")
 
 # Strain-Controlled Correlations
 st.subheader("🎯 Strain-Controlled Correlations")
-st.markdown("Shows nutrition's **independent effect** after removing strain's influence")
+st.markdown("Shows nutrition's **independent effect** after removing strain's influence (nutrition today → WHOOP metrics tomorrow)")
 
 with st.spinner("Calculating partial correlations..."):
-    strain_controlled = analytics.analyze_strain_controlled_correlations(start_date, end_date, lag_days=0)
+    strain_controlled = analytics.analyze_strain_controlled_correlations(start_date, end_date, lag_days=1)
 
 if not strain_controlled.empty:
     # Filter to significant results and sort by controlled correlation

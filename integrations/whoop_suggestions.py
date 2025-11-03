@@ -99,10 +99,18 @@ class WhoopSuggestionEngine:
                 action = "increase"
 
         # Format current average
-        if nutrition_metric == "total_kcal":
+        if nutrition_metric == "total_kcal" or nutrition_metric == "total_calories_from_macros":
             current_str = f"{current_avg:.0f} kcal"
         elif nutrition_metric in ["total_protein", "total_carbs", "total_fat", "total_fiber"]:
             current_str = f"{current_avg:.0f}g"
+        elif nutrition_metric == "combined_protein_and_carbs":
+            current_str = f"{current_avg:.0f}g"
+        elif nutrition_metric in ["percent_calories_from_protein", "percent_calories_from_carbs", "percent_calories_from_fat"]:
+            current_str = f"{current_avg:.1f}%"
+        elif nutrition_metric == "protein_grams_per_100_calories":
+            current_str = f"{current_avg:.1f}g/100kcal"
+        elif nutrition_metric == "protein_per_gram_of_carbs":
+            current_str = f"{current_avg:.2f}g protein per g carbs"
         else:
             current_str = f"{current_avg:.1f}"
 
