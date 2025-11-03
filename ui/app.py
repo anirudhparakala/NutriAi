@@ -54,6 +54,22 @@ except (FileNotFoundError, KeyError):
     st.stop()
 
 
+# --- WHOOP Auto-Sync on Startup ---
+@st.cache_resource(ttl=3600)  # Cache for 1 hour
+def whoop_auto_sync():
+    """Auto-sync WHOOP data on app startup (cached for 1 hour)."""
+    try:
+        from integrations.whoop_sync import auto_sync_on_startup
+        auto_sync_on_startup(days=30)
+        return True
+    except Exception as e:
+        logger.warning(f"WHOOP auto-sync failed: {e}")
+        return False
+
+# Run auto-sync (silent, non-blocking)
+whoop_auto_sync()
+
+
 # --- Tool Setup ---
 search_function = create_search_tool_function(tavily)
 
@@ -981,8 +997,8 @@ def show_chatbot():
     """AI nutrition coach chatbot for querying historical data."""
     from core.chatbot import NutritionChatbot
 
-    st.title("💬 Nutrition Chatbot")
-    st.markdown("Ask me anything about your nutrition history! I can analyze your eating patterns, compare time periods, and provide personalized recommendations.")
+    st.title("💬 AI Nutrition Coach")
+    st.markdown("Ask me anything about your nutrition and WHOOP data! I can analyze eating patterns, discover correlations with your recovery/sleep/performance, and provide personalized recommendations.")
 
     # Check for OpenAI API key
     try:
@@ -1005,16 +1021,20 @@ def show_chatbot():
     # Example questions
     with st.expander("💡 Example Questions"):
         st.markdown("""
+        **Nutrition Questions:**
         - How many calories did I eat yesterday?
         - What's my average protein intake over the last week?
         - Am I eating enough protein for my bodyweight? (I weigh 70kg)
-        - What can I improve in my diet?
-        - Show me my highest calorie day this month
-        - How much of my calories come from McDonald's?
         - Compare this week to last week
-        - What percentage of my diet is carbs?
         - Which foods do I eat most frequently?
-        - Am I being consistent with tracking?
+
+        **WHOOP Integration Questions:**
+        - How does my nutrition affect my recovery?
+        - What should I eat to improve my sleep?
+        - Show me correlations between my diet and WHOOP metrics
+        - Why is my recovery low? What can I change?
+        - Does protein intake affect my HRV?
+        - Give me personalized suggestions based on my WHOOP data
         """)
 
     # Display chat history

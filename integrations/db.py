@@ -5,7 +5,7 @@ import os
 from typing import List, Dict, Optional
 
 DB_PATH = "nutri_ai.db"
-SCHEMA_VERSION = 4  # Bump this when making schema changes
+SCHEMA_VERSION = 6  # Bump this when making schema changes
 
 
 def get_schema_version(con):
@@ -129,6 +129,64 @@ def migrate_schema(con):
         except sqlite3.OperationalError as e:
             print(f"Migration 4 skipped or already applied: {e}")
             set_schema_version(con, 4)
+
+    if current_version < 5:
+        # Migration 5: Add WHOOP integration tables
+        print("Running migration 5: Creating WHOOP tables")
+        try:
+            # WHOOP daily data table
+            cur.execute("""CREATE TABLE IF NOT EXISTS whoop_daily_data (
+                date TEXT PRIMARY KEY,
+                recovery_score REAL,
+                hrv REAL,
+                rhr REAL,
+                strain REAL,
+                avg_hr REAL,
+                sleep_performance REAL,
+                sleep_efficiency REAL,
+                sleep_duration_min REAL,
+                deep_sleep_min REAL,
+                rem_sleep_min REAL,
+                sleep_debt_min REAL,
+                calories_burned REAL,
+                workouts_json TEXT,
+                synced_at REAL NOT NULL
+            )""")
+
+            # User settings table for body weight and preferences
+            cur.execute("""CREATE TABLE IF NOT EXISTS user_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at REAL NOT NULL
+            )""")
+
+            # Create indices for efficient queries
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_whoop_date ON whoop_daily_data(date)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_whoop_synced ON whoop_daily_data(synced_at)")
+
+            con.commit()
+            set_schema_version(con, 5)
+            print("Migration 5 complete")
+        except sqlite3.OperationalError as e:
+            print(f"Migration 5 skipped or already applied: {e}")
+            set_schema_version(con, 5)
+
+    if current_version < 6:
+        # Migration 6: Add nutrition macro columns to sessions table
+        print("Running migration 6: Adding macro columns to sessions")
+        try:
+            cur.execute("ALTER TABLE sessions ADD COLUMN kcal REAL")
+            cur.execute("ALTER TABLE sessions ADD COLUMN protein_g REAL")
+            cur.execute("ALTER TABLE sessions ADD COLUMN carbs_g REAL")
+            cur.execute("ALTER TABLE sessions ADD COLUMN fat_g REAL")
+            cur.execute("ALTER TABLE sessions ADD COLUMN fiber_g REAL")
+
+            con.commit()
+            set_schema_version(con, 6)
+            print("Migration 6 complete")
+        except sqlite3.OperationalError as e:
+            print(f"Migration 6 skipped or already applied: {e}")
+            set_schema_version(con, 6)
 
     print(f"Database schema is at version {SCHEMA_VERSION}")
 
@@ -730,3 +788,51 @@ def validate_session(session_id, notes=None):
     con.commit()
     con.close()
     print(f"Marked session {session_id} as validated")
+
+
+def get_user_setting(key: str) -> Optional[str]:
+    """
+    Get a user setting value by key.
+
+    Args:
+        key: Setting key (e.g., 'body_weight_kg', 'height_cm', 'calorie_goal')
+
+    Returns:
+        Setting value as string, or None if not found
+    """
+    if not os.path.exists(DB_PATH):
+        init()
+
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("SELECT value FROM user_settings WHERE key = ?", (key,))
+    row = cur.fetchone()
+    con.close()
+
+    return row[0] if row else None
+
+
+def set_user_setting(key: str, value: str):
+    """
+    Set or update a user setting.
+
+    Args:
+        key: Setting key (e.g., 'body_weight_kg', 'height_cm', 'calorie_goal')
+        value: Setting value as string
+    """
+    if not os.path.exists(DB_PATH):
+        init()
+
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    now = time.time()
+
+    cur.execute("""
+        INSERT INTO user_settings (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    """, (key, value, now))
+
+    con.commit()
+    con.close()
+    print(f"Updated user setting: {key} = {value}")

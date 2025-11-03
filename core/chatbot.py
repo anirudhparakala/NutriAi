@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict
 import json
 from core import metrics
+from core import whoop_metrics
 
 
 # OpenAI function definitions for all 16 metric functions
@@ -328,6 +329,178 @@ FUNCTION_DEFINITIONS = [
             },
             "required": ["period1_start", "period1_end", "period2_start", "period2_end"]
         }
+    },
+    {
+        "name": "get_whoop_correlations",
+        "description": "Get correlations between nutrition (protein, carbs, fat, calories) and WHOOP physiological metrics (recovery, sleep, strain, HRV). Shows which nutrition factors correlate with performance.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "days_back": {
+                    "type": "integer",
+                    "description": "Number of days to analyze (default 30)",
+                    "default": 30
+                },
+                "min_significance": {
+                    "type": "number",
+                    "description": "Minimum p-value for significance (default 0.05)",
+                    "default": 0.05
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "get_whoop_suggestions",
+        "description": "Get personalized nutrition suggestions based on discovered correlations with WHOOP metrics. Provides actionable recommendations to improve recovery, sleep, or performance.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "days_back": {
+                    "type": "integer",
+                    "description": "Number of days to analyze (default 30)",
+                    "default": 30
+                },
+                "focus_metric": {
+                    "type": "string",
+                    "description": "Optional: focus on specific WHOOP metric (recovery_score, sleep_performance, strain, hrv)",
+                    "enum": ["recovery_score", "sleep_performance", "strain", "hrv"]
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "get_whoop_recovery_suggestions",
+        "description": "Get nutrition suggestions specifically for improving recovery score. Use when user asks about improving recovery or feels tired.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "days_back": {
+                    "type": "integer",
+                    "description": "Number of days to analyze (default 30)",
+                    "default": 30
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "get_whoop_sleep_suggestions",
+        "description": "Get nutrition suggestions specifically for improving sleep performance. Use when user asks about sleep quality or sleep issues.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "days_back": {
+                    "type": "integer",
+                    "description": "Number of days to analyze (default 30)",
+                    "default": 30
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "get_whoop_data_availability",
+        "description": "Check how many days of WHOOP and nutrition data are available for analysis. Use this to verify sufficient data before running correlation analysis.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "days_back": {
+                    "type": "integer",
+                    "description": "Number of days to check (default 30)",
+                    "default": 30
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "get_whoop_summary",
+        "description": "Get summary statistics for WHOOP metrics (average recovery, strain, sleep, HRV, etc.) over a time period.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "days_back": {
+                    "type": "integer",
+                    "description": "Number of days to summarize (default 30)",
+                    "default": 30
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "get_strain_controlled_correlations",
+        "description": "Get correlations between nutrition and WHOOP metrics with strain's confounding effect REMOVED. Shows nutrition's TRUE independent effect. Use this for more accurate insights when strain might be masking the real relationship.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "days_back": {
+                    "type": "integer",
+                    "description": "Number of days to analyze (default 30)",
+                    "default": 30
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "get_stratified_analysis",
+        "description": "Analyze if nutrition matters MORE on high-strain days vs low-strain days. Splits data into low/medium/high strain groups to discover when nutrition has the biggest impact.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "days_back": {
+                    "type": "integer",
+                    "description": "Number of days to analyze (default 30)",
+                    "default": 30
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "get_interaction_effects",
+        "description": "Discover when nutrition matters MORE based on context (strain, sleep debt, recovery state, HRV, calorie burn). Tests 5 interaction types to find optimal timing for nutrition interventions.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "days_back": {
+                    "type": "integer",
+                    "description": "Number of days to analyze (default 30)",
+                    "default": 30
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "get_context_aware_suggestions",
+        "description": "Get personalized nutrition suggestions based on CURRENT physiological state (strain, recovery, sleep debt). Provides context-aware recommendations that adapt to today's conditions.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "days_back": {
+                    "type": "integer",
+                    "description": "Number of days to analyze (default 30)",
+                    "default": 30
+                },
+                "current_strain": {
+                    "type": "number",
+                    "description": "Current strain score (optional). If provided, generates strain-specific advice."
+                },
+                "current_recovery": {
+                    "type": "number",
+                    "description": "Current recovery percentage (optional). If provided, adjusts advice based on recovery state."
+                },
+                "current_sleep_debt": {
+                    "type": "number",
+                    "description": "Current sleep debt in minutes (optional). If provided, factors in sleep deprivation."
+                }
+            },
+            "required": []
+        }
     }
 ]
 
@@ -349,7 +522,19 @@ FUNCTION_MAP = {
     "get_lowest_macro_days": metrics.get_lowest_macro_days,
     "get_most_frequent_foods": metrics.get_most_frequent_foods,
     "get_food_calorie_contribution": metrics.get_food_calorie_contribution,
-    "compare_time_periods": metrics.compare_time_periods
+    "compare_time_periods": metrics.compare_time_periods,
+    # WHOOP correlation functions
+    "get_whoop_correlations": whoop_metrics.get_whoop_correlations,
+    "get_whoop_suggestions": whoop_metrics.get_whoop_suggestions,
+    "get_whoop_recovery_suggestions": whoop_metrics.get_whoop_recovery_suggestions,
+    "get_whoop_sleep_suggestions": whoop_metrics.get_whoop_sleep_suggestions,
+    "get_whoop_data_availability": whoop_metrics.get_whoop_data_availability,
+    "get_whoop_summary": whoop_metrics.get_whoop_summary,
+    # Advanced WHOOP analytics functions
+    "get_strain_controlled_correlations": whoop_metrics.get_strain_controlled_correlations,
+    "get_stratified_analysis": whoop_metrics.get_stratified_analysis,
+    "get_interaction_effects": whoop_metrics.get_interaction_effects,
+    "get_context_aware_suggestions": whoop_metrics.get_context_aware_suggestions
 }
 
 
@@ -371,7 +556,7 @@ class NutritionChatbot:
         self.conversation_history = []
 
         # System prompt for nutrition coaching
-        self.system_prompt = f"""You are an AI nutrition coach assistant. You help users understand their eating habits by analyzing their food log data.
+        self.system_prompt = f"""You are an AI nutrition coach assistant with access to both nutrition tracking data and WHOOP physiological metrics. You help users optimize their nutrition based on how it affects their recovery, sleep, and performance.
 
 Current date: {datetime.now().strftime('%Y-%m-%d')}
 
@@ -387,7 +572,39 @@ When users ask questions:
 6. Be supportive and encouraging while providing honest feedback
 7. When dates are mentioned relatively (yesterday, last week, etc.), calculate the actual dates based on current date
 
-Format your responses in a friendly, conversational tone. Use specific numbers from the data to support your recommendations."""
+**WHOOP Integration Capabilities:**
+8. Use WHOOP correlation functions to discover relationships between nutrition and physiological metrics:
+   BASIC FUNCTIONS:
+   - get_whoop_correlations(): Shows which nutrients correlate with recovery, sleep, strain, HRV
+   - get_whoop_suggestions(): Provides personalized recommendations based on discovered correlations
+   - get_whoop_recovery_suggestions(): Focus on improving recovery score
+   - get_whoop_sleep_suggestions(): Focus on improving sleep quality
+   - get_whoop_summary(): Get average WHOOP metrics over a period
+   - get_whoop_data_availability(): Check if enough data exists for analysis
+
+   ADVANCED FUNCTIONS (Use these for deeper insights):
+   - get_strain_controlled_correlations(): Shows nutrition's TRUE effect after removing strain's confounding influence
+   - get_stratified_analysis(): Discover if nutrition matters MORE on high-strain vs low-strain days
+   - get_interaction_effects(): Find when nutrition matters MORE based on context (strain, sleep debt, recovery state)
+   - get_context_aware_suggestions(): Get personalized advice based on TODAY's strain, recovery, and sleep debt
+
+9. When discussing WHOOP correlations:
+   - Explain correlation strength (weak <0.3, moderate 0.3-0.5, strong >0.5)
+   - Mention statistical significance (p-value)
+   - Explain lag effects (e.g., "protein today affects recovery tomorrow")
+   - Always emphasize correlation ≠ causation
+   - Suggest trying recommendations as experiments, not guaranteed results
+   - Use advanced functions when users want deeper insights or ask "when does nutrition matter more"
+
+10. Proactively suggest WHOOP analysis when users ask about:
+    - Recovery, energy levels, or feeling tired
+    - Sleep quality or sleep issues
+    - Performance optimization
+    - What to change in their diet
+    - When nutrition matters more (use get_stratified_analysis or get_interaction_effects)
+    - Today's specific recommendations (use get_context_aware_suggestions)
+
+Format your responses in a friendly, conversational tone. Use specific numbers from the data to support your recommendations. When presenting correlation data, be clear about statistical confidence and suggest actionable experiments."""
 
         self.conversation_history.append({
             "role": "system",
